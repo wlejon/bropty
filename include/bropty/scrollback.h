@@ -1,50 +1,135 @@
 #pragma once
+// Scrollback: rows scrolled off the top of the primary screen, stored as
+// compactly encoded *logical* lines (soft-wrapped rows joined). Because lines
+// are stored unwrapped, a width change only recomputes how many rows each
+// line occupies; nothing is re-encoded. Blobs live in large shared blocks
+// (no per-line heap allocation); a plain ASCII line costs about its length in
+// bytes plus a 40-byte record.
+//
+// Capacity is counted in physical rows at the current width. When it is
+// exceeded the oldest lines are dropped. A single line that alone grows past
+// half the capacity stops being continued (it is split there), so appending
+// to it stays O(row) and evicting it never empties the whole history.
 
 #include "bropty/cell.h"
-#include <deque>
-#include <vector>
+
 #include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace bropty {
 
-struct ScrollbackLine {
-    std::vector<Cell> cells;
-    bool wrapped{false}; // True if automatically wrapped to the next line
+namespace detail {
+struct LogicalLine;
+}
 
-    ScrollbackLine() = default;
-    ScrollbackLine(std::vector<Cell> c, bool w) : cells(std::move(c)), wrapped(w) {}
-};
-
-class ScrollbackBuffer {
+class Scrollback {
 public:
-    explicit ScrollbackBuffer(size_t max_lines = 10000);
+    explicit Scrollback(size_t max_rows = 10000, int cols = 80);
+    ~Scrollback();
+    Scrollback(const Scrollback&) = delete;
+    Scrollback& operator=(const Scrollback&) = delete;
 
-    // Push a line evicted from the top of the grid
-    void push_line(std::vector<Cell> cells, bool wrapped);
+    [[nodiscard]] size_t max_rows() const noexcept { return max_rows_; }
+    void set_max_rows(size_t n);
+    [[nodiscard]] int cols() const noexcept { return cols_; }
+    // Change the wrap width; recomputes row counts (and trims to capacity).
+    void set_cols(int cols);
 
-    // Pop the most recent line (used when scrolling back down or moving lines back to grid during resize)
-    bool pop_line(std::vector<Cell>& out_cells, bool& out_wrapped);
+    // Append one screen row. If the previous pushed row soft-wrapped, this row
+    // continues that logical line. `styles` resolves the row's style ids.
+    void push_row(const Cell* cells, int ncols, uint32_t row_flags, const ClusterMap* clusters,
+                  const Style* styles);
 
-    [[nodiscard]] size_t size() const noexcept { return lines_.size(); }
-    [[nodiscard]] size_t max_lines() const noexcept { return max_lines_; }
-    void set_max_lines(size_t max_lines);
+    [[nodiscard]] size_t rows() const noexcept { return total_rows_; }
+    [[nodiscard]] size_t lines() const noexcept { return recs_.size(); }
+    [[nodiscard]] bool empty() const noexcept { return recs_.empty(); }
 
-    [[nodiscard]] bool empty() const noexcept { return lines_.empty(); }
-    void clear() noexcept;
+    // Row i of the history (0 = oldest), wrapped at the current width. The
+    // view is valid until the scrollback is next modified.
+    [[nodiscard]] RowView row(size_t i) const;
 
-    // Direct access (0 = oldest, size() - 1 = most recent)
-    [[nodiscard]] const ScrollbackLine& get_line(size_t index) const;
-    [[nodiscard]] ScrollbackLine& get_line(size_t index);
+    // Whether the newest line continues onto the screen.
+    [[nodiscard]] bool last_continued() const noexcept;
 
-    // Safe cell access with default blank fallback
-    [[nodiscard]] const Cell& get_cell(size_t line_index, size_t col) const;
+    // Reflow support: remove the newest line and decode it with styles
+    // interned through `table`.
+    void pop_last(detail::LogicalLine& out, StyleTable& table);
+    // Append a whole logical line (cell styles index `styles`).
+    void push_line(const detail::LogicalLine& line, const Style* styles);
 
-    // Reflow all lines when terminal column count changes
-    void reflow(int new_cols);
+    void clear();
+
+    // Approximate heap bytes held (blocks + records).
+    [[nodiscard]] size_t memory_bytes() const noexcept;
+
+    // Visit every hyperlink id referenced from history.
+    template <class F>
+    void for_each_link(F&& f) const;
+    void collect_links(std::vector<uint32_t>& out) const;
 
 private:
-    size_t max_lines_{10000};
-    std::deque<ScrollbackLine> lines_;
+    struct Rec {
+        uint64_t seq;        // monotonic line id (cache key)
+        uint64_t first_row;  // global row counter of the line's first row
+        uint64_t block;      // block sequence number
+        uint32_t offset;
+        uint32_t bytes;
+        uint32_t columns;    // total columns of content (wide = 2)
+        uint32_t rows;       // rows at the current width
+        uint32_t flags;      // Row_* semantic flags | kContinued | kHasWide
+    };
+    struct Block {
+        std::unique_ptr<uint8_t[]> data;
+        uint32_t cap{0};
+        uint32_t used{0};
+        uint32_t live{0};
+    };
+    struct Decoded {
+        std::vector<Cell> cells;  // rows * cols
+        std::vector<uint32_t> flags;
+        std::vector<ClusterMap> clusters;  // empty unless the line has clusters
+        std::vector<Style> palette;
+    };
+
+    static constexpr uint32_t kContinued = 1u << 30;
+    static constexpr uint32_t kHasWide = 1u << 29;
+    // The line's last row ended in a SpacerHead (its continuation started, or
+    // once started, with a wide cell): a last row one column short of the
+    // width is shown ending in a SpacerHead again.
+    static constexpr uint32_t kNextWide = 1u << 28;
+    static constexpr size_t kBlockSize = 64 * 1024;
+
+    void append_bytes(Rec& rec, const std::string& bytes, bool new_line);
+    uint32_t rows_for(const Rec& rec) const;
+    void decode_rec(const Rec& rec, detail::LogicalLine& out, std::vector<Style>& palette) const;
+    void pop_front();
+    void enforce_capacity();
+    const uint8_t* blob(const Rec& rec) const;
+    size_t find_line(uint64_t global_row) const;
+    const Decoded& decoded(size_t line_index) const;
+
+    size_t max_rows_;
+    int cols_;
+    std::deque<Rec> recs_;
+    std::deque<Block> blocks_;
+    uint64_t block_base_{0};  // sequence number of blocks_.front()
+    uint64_t next_seq_{0};
+    size_t total_rows_{0};
+    std::string scratch_;
+
+    mutable std::unordered_map<uint64_t, Decoded> cache_;
 };
+
+template <class F>
+void Scrollback::for_each_link(F&& f) const {
+    std::vector<uint32_t> ids;
+    collect_links(ids);
+    for (uint32_t id : ids) f(id);
+}
 
 } // namespace bropty

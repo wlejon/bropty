@@ -190,7 +190,7 @@ std::string KeyEncoder::encode_standard(Key key, uint32_t codepoint, uint8_t mod
 
         // Function Keys F1-F4
         case Key::F1: case Key::F2: case Key::F3: case Key::F4: {
-            char f = 'P' + static_cast<int>(key) - static_cast<int>(Key::F1);
+            char f = static_cast<char>('P' + static_cast<int>(key) - static_cast<int>(Key::F1));
             if (mod > 1) return "\x1b[1;" + std::to_string(mod) + f;
             std::string s = "\x1bO";
             s.push_back(f);

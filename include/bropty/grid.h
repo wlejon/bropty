@@ -1,124 +1,89 @@
 #pragma once
+// The visible screen: rows x cols cells in one contiguous allocation, with a
+// row indirection table so scrolling rotates row indices instead of moving
+// cells. Per-row metadata (flags, cluster tails) travels with its storage row.
+// Dirty bits are per *screen position*: a renderer re-reads exactly the rows
+// whose bit is set and clears them with clear_dirty().
 
 #include "bropty/cell.h"
+
+#include <cstdint>
+#include <memory>
 #include <vector>
-#include <cstddef>
-#include <functional>
 
 namespace bropty {
 
-enum class CursorShape : uint8_t {
-    Block = 0,
-    Beam = 1,
-    Underline = 2
-};
-
-struct Cursor {
-    int row{0};
-    int col{0};
-    bool visible{true};
-    bool blinking{true};
-    CursorShape shape{CursorShape::Block};
-
-    // Stored attributes for character emission
-    Cell pen{};
-};
-
 class Grid {
 public:
-    using EvictLineCallback = std::function<void(std::vector<Cell> cells, bool wrapped)>;
-
     Grid(int cols, int rows);
 
     [[nodiscard]] int cols() const noexcept { return cols_; }
     [[nodiscard]] int rows() const noexcept { return rows_; }
 
-    // Cell access
-    [[nodiscard]] const Cell& get_cell(int row, int col) const;
-    [[nodiscard]] Cell& get_cell(int row, int col);
-    void set_cell(int row, int col, const Cell& cell);
+    [[nodiscard]] Cell* row(int y) noexcept { return &cells_[size_t(map_[size_t(y)]) * size_t(cols_)]; }
+    [[nodiscard]] const Cell* row(int y) const noexcept { return &cells_[size_t(map_[size_t(y)]) * size_t(cols_)]; }
+    [[nodiscard]] Cell& at(int y, int x) noexcept { return row(y)[x]; }
+    [[nodiscard]] const Cell& at(int y, int x) const noexcept { return row(y)[x]; }
 
-    // Line access
-    [[nodiscard]] std::vector<Cell> get_line(int row) const;
-    [[nodiscard]] bool is_line_wrapped(int row) const;
-    void set_line_wrapped(int row, bool wrapped);
+    [[nodiscard]] uint32_t flags(int y) const noexcept { return meta_[map_[size_t(y)]].flags; }
+    void set_flags(int y, uint32_t f) noexcept { meta_[map_[size_t(y)]].flags = f; }
+    void set_flag(int y, uint32_t f, bool on) noexcept {
+        uint32_t& v = meta_[map_[size_t(y)]].flags;
+        v = on ? (v | f) : (v & ~f);
+    }
+    [[nodiscard]] bool wrapped(int y) const noexcept { return (flags(y) & Row_Wrapped) != 0; }
 
-    // Cursor
-    [[nodiscard]] const Cursor& cursor() const noexcept { return cursor_; }
-    [[nodiscard]] Cursor& cursor() noexcept { return cursor_; }
-    void set_cursor_pos(int row, int col);
-    void move_cursor_rel(int drow, int dcol);
-    void save_cursor();
-    void restore_cursor();
+    [[nodiscard]] const ClusterMap* clusters(int y) const noexcept { return meta_[map_[size_t(y)]].clusters.get(); }
+    ClusterMap& clusters_mut(int y);
+    // The cluster text at (y, x): base code point plus any tail.
+    [[nodiscard]] std::u32string cluster(int y, int x) const;
 
-    // Scrolling margins (0-indexed, inclusive)
-    [[nodiscard]] int top_margin() const noexcept { return top_margin_; }
-    [[nodiscard]] int bottom_margin() const noexcept { return bottom_margin_; }
-    void set_margins(int top, int bottom);
-    void reset_margins();
+    // Fill [x0, x1) of row y with `fill`, dropping any cluster tails there.
+    void fill(int y, int x0, int x1, Cell fill);
+    // Reset row y entirely (cells, flags, clusters).
+    void clear_row(int y, Cell fill);
 
-    // Damage / Dirty line tracking
-    [[nodiscard]] bool has_damage() const noexcept { return damage_count_ > 0; }
-    [[nodiscard]] bool is_line_dirty(int row) const;
-    void mark_dirty(int row);
-    void mark_range_dirty(int start_row, int end_row);
-    void mark_all_dirty();
-    void clear_damage() noexcept;
+    // Rotate rows [top, bottom] up by n: rows top..top+n-1 move (as storage)
+    // to the bottom of the range. The caller clears the n recycled rows.
+    void rotate_up(int top, int bottom, int n);
+    void rotate_down(int top, int bottom, int n);
 
-    // Output writing
-    // Writes a codepoint with pen attributes at cursor position.
-    // Handles wide character (width 1 or 2) and auto-wrap.
-    void write_char(uint32_t codepoint, uint8_t width, EvictLineCallback evict_cb = nullptr);
+    // Copy one row's cells/clusters [x0, x1) from (sy) to (dy) at dx (used for
+    // horizontal-margin scrolling, where whole-row rotation is not possible).
+    void copy_span(int sy, int sx0, int sx1, int dy, int dx);
 
-    // Erasing operations
-    void erase_in_line(int mode);    // 0: cursor to end, 1: start to cursor, 2: whole line
-    void erase_in_display(int mode, EvictLineCallback evict_cb = nullptr); // 0: below, 1: above, 2: all
-    void erase_chars(int count);     // Erase count chars starting from cursor without shifting
+    // Resize without reflow: crop or pad on the right and bottom.
+    void resize_crop(int cols, int rows);
 
-    // Line / Character insertion and deletion
-    void insert_lines(int count);
-    void delete_lines(int count);
-    void insert_chars(int count);
-    void delete_chars(int count);
+    [[nodiscard]] RowView view(int y, const Style* styles) const noexcept;
 
-    // Scrolling
-    void scroll_up(int count, EvictLineCallback evict_cb = nullptr);
-    void scroll_down(int count);
+    // Damage tracking.
+    void mark_dirty(int y) noexcept { dirty_[size_t(y)] = 1; }
+    void mark_dirty(int y0, int y1) noexcept {  // [y0, y1]
+        for (int y = y0; y <= y1; ++y) dirty_[size_t(y)] = 1;
+    }
+    void mark_all_dirty() noexcept;
+    [[nodiscard]] bool dirty(int y) const noexcept { return dirty_[size_t(y)] != 0; }
+    void clear_dirty() noexcept;
 
-    // Resize grid
-    void resize(int new_cols, int new_rows);
-
-    // Modes
-    [[nodiscard]] bool auto_wrap() const noexcept { return auto_wrap_; }
-    void set_auto_wrap(bool enabled) noexcept { auto_wrap_ = enabled; }
-
-    [[nodiscard]] bool origin_mode() const noexcept { return origin_mode_; }
-    void set_origin_mode(bool enabled) noexcept;
-
-private:
-    int cols_{80};
-    int rows_{24};
-    int top_margin_{0};
-    int bottom_margin_{23};
-
-    std::vector<Cell> cells_;
-    std::vector<bool> wrapped_lines_;
-    std::vector<bool> dirty_lines_;
-    size_t damage_count_{0};
-
-    Cursor cursor_{};
-    Cursor saved_cursor_{};
-    bool cursor_saved_{false};
-
-    bool auto_wrap_{true};
-    bool wrap_next_{false}; // Pending wrap flag on next printable character
-    bool origin_mode_{false};
-
-    [[nodiscard]] size_t cell_index(int row, int col) const noexcept {
-        return static_cast<size_t>(row) * static_cast<size_t>(cols_) + static_cast<size_t>(col);
+    // Visit every cell (for style mark-and-sweep).
+    template <class F>
+    void for_each_cell(F&& f) const {
+        for (const Cell& c : cells_) f(c);
     }
 
-    void clamp_cursor();
+private:
+    struct Meta {
+        uint32_t flags{0};
+        std::unique_ptr<ClusterMap> clusters;
+    };
+
+    int cols_;
+    int rows_;
+    std::vector<Cell> cells_;
+    std::vector<uint32_t> map_;
+    std::vector<Meta> meta_;
+    std::vector<uint8_t> dirty_;
 };
 
 } // namespace bropty

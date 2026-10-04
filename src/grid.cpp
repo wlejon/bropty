@@ -1,445 +1,136 @@
 #include "bropty/grid.h"
+
 #include <algorithm>
-#include <cstring>
-#include <stdexcept>
 
 namespace bropty {
 
-namespace {
-const Cell kBlankCell{};
+Grid::Grid(int cols, int rows) : cols_(std::max(1, cols)), rows_(std::max(1, rows)) {
+    cells_.assign(size_t(cols_) * size_t(rows_), Cell{});
+    map_.resize(size_t(rows_));
+    meta_.resize(size_t(rows_));
+    for (int i = 0; i < rows_; ++i) map_[size_t(i)] = uint32_t(i);
+    dirty_.assign(size_t(rows_), 1);
 }
 
-Grid::Grid(int cols, int rows)
-    : cols_(std::max(1, cols)),
-      rows_(std::max(1, rows)),
-      top_margin_(0),
-      bottom_margin_(rows_ - 1),
-      cells_(static_cast<size_t>(cols_) * static_cast<size_t>(rows_), kBlankCell),
-      wrapped_lines_(rows_, false),
-      dirty_lines_(rows_, true),
-      damage_count_(rows_) {}
+ClusterMap& Grid::clusters_mut(int y) {
+    auto& m = meta_[map_[size_t(y)]];
+    if (!m.clusters) m.clusters = std::make_unique<ClusterMap>();
+    return *m.clusters;
+}
 
-const Cell& Grid::get_cell(int row, int col) const {
-    if (row < 0 || row >= rows_ || col < 0 || col >= cols_) {
-        return kBlankCell;
+std::u32string Grid::cluster(int y, int x) const {
+    std::u32string out;
+    const Cell& c = at(y, x);
+    if (c.is_empty() || c.is_spacer()) return out;
+    out.push_back(c.cp());
+    if (c.has_cluster()) {
+        if (const ClusterMap* m = clusters(y)) out.append(m->find(x));
     }
-    return cells_[cell_index(row, col)];
+    return out;
 }
 
-Cell& Grid::get_cell(int row, int col) {
-    if (row < 0 || row >= rows_ || col < 0 || col >= cols_) {
-        throw std::out_of_range("Grid cell coordinate out of range");
-    }
-    return cells_[cell_index(row, col)];
+void Grid::fill(int y, int x0, int x1, Cell fill) {
+    x0 = std::max(0, x0);
+    x1 = std::min(cols_, x1);
+    if (x0 >= x1) return;
+    Cell* r = row(y);
+    std::fill(r + x0, r + x1, fill);
+    auto& m = meta_[map_[size_t(y)]];
+    if (m.clusters) m.clusters->erase_range(x0, x1);
+    dirty_[size_t(y)] = 1;
 }
 
-void Grid::set_cell(int row, int col, const Cell& cell) {
-    if (row < 0 || row >= rows_ || col < 0 || col >= cols_) return;
-    cells_[cell_index(row, col)] = cell;
-    mark_dirty(row);
+void Grid::clear_row(int y, Cell fill) {
+    Cell* r = row(y);
+    std::fill(r, r + cols_, fill);
+    auto& m = meta_[map_[size_t(y)]];
+    m.flags = 0;
+    if (m.clusters) m.clusters->clear();
+    dirty_[size_t(y)] = 1;
 }
 
-std::vector<Cell> Grid::get_line(int row) const {
-    if (row < 0 || row >= rows_) return {};
-    size_t start = static_cast<size_t>(row) * static_cast<size_t>(cols_);
-    return std::vector<Cell>(cells_.begin() + start, cells_.begin() + start + cols_);
+void Grid::rotate_up(int top, int bottom, int n) {
+    if (n <= 0 || top >= bottom + 1) return;
+    n = std::min(n, bottom - top + 1);
+    std::rotate(map_.begin() + top, map_.begin() + top + n, map_.begin() + bottom + 1);
+    mark_dirty(top, bottom);
 }
 
-bool Grid::is_line_wrapped(int row) const {
-    if (row < 0 || row >= rows_) return false;
-    return wrapped_lines_[row];
+void Grid::rotate_down(int top, int bottom, int n) {
+    if (n <= 0 || top >= bottom + 1) return;
+    n = std::min(n, bottom - top + 1);
+    std::rotate(map_.begin() + top, map_.begin() + (bottom + 1 - n), map_.begin() + bottom + 1);
+    mark_dirty(top, bottom);
 }
 
-void Grid::set_line_wrapped(int row, bool wrapped) {
-    if (row >= 0 && row < rows_) {
-        wrapped_lines_[row] = wrapped;
-    }
-}
-
-void Grid::set_cursor_pos(int row, int col) {
-    wrap_next_ = false;
-    if (origin_mode_) {
-        cursor_.row = top_margin_ + row;
-        cursor_.col = col;
+void Grid::copy_span(int sy, int sx0, int sx1, int dy, int dx) {
+    if (sx0 >= sx1) return;
+    const Cell* s = row(sy);
+    Cell* d = row(dy);
+    int n = sx1 - sx0;
+    // memmove semantics: overlapping same-row copies are safe.
+    if (d + dx < s + sx0) {
+        std::copy(s + sx0, s + sx1, d + dx);
     } else {
-        cursor_.row = row;
-        cursor_.col = col;
-    }
-    clamp_cursor();
-}
-
-void Grid::move_cursor_rel(int drow, int dcol) {
-    wrap_next_ = false;
-    cursor_.row += drow;
-    cursor_.col += dcol;
-    clamp_cursor();
-}
-
-void Grid::clamp_cursor() {
-    int min_row = origin_mode_ ? top_margin_ : 0;
-    int max_row = origin_mode_ ? bottom_margin_ : rows_ - 1;
-    cursor_.row = std::clamp(cursor_.row, min_row, max_row);
-    cursor_.col = std::clamp(cursor_.col, 0, cols_ - 1);
-}
-
-void Grid::save_cursor() {
-    saved_cursor_ = cursor_;
-    cursor_saved_ = true;
-}
-
-void Grid::restore_cursor() {
-    if (cursor_saved_) {
-        cursor_ = saved_cursor_;
-        wrap_next_ = false;
-        clamp_cursor();
-    }
-}
-
-void Grid::set_margins(int top, int bottom) {
-    if (top < 0) top = 0;
-    if (bottom >= rows_) bottom = rows_ - 1;
-    if (top < bottom) {
-        top_margin_ = top;
-        bottom_margin_ = bottom;
-        set_cursor_pos(0, 0);
-    }
-}
-
-void Grid::reset_margins() {
-    top_margin_ = 0;
-    bottom_margin_ = rows_ - 1;
-}
-
-bool Grid::is_line_dirty(int row) const {
-    if (row < 0 || row >= rows_) return false;
-    return dirty_lines_[row];
-}
-
-void Grid::mark_dirty(int row) {
-    if (row >= 0 && row < rows_ && !dirty_lines_[row]) {
-        dirty_lines_[row] = true;
-        damage_count_++;
-    }
-}
-
-void Grid::mark_range_dirty(int start_row, int end_row) {
-    start_row = std::max(0, start_row);
-    end_row = std::min(rows_ - 1, end_row);
-    for (int r = start_row; r <= end_row; ++r) {
-        mark_dirty(r);
-    }
-}
-
-void Grid::mark_all_dirty() {
-    std::fill(dirty_lines_.begin(), dirty_lines_.end(), true);
-    damage_count_ = rows_;
-}
-
-void Grid::clear_damage() noexcept {
-    std::fill(dirty_lines_.begin(), dirty_lines_.end(), false);
-    damage_count_ = 0;
-}
-
-void Grid::write_char(uint32_t codepoint, uint8_t width, EvictLineCallback evict_cb) {
-    if (width == 0) return;
-
-    if (wrap_next_) {
-        if (auto_wrap_) {
-            wrapped_lines_[cursor_.row] = true;
-            if (cursor_.row == bottom_margin_) {
-                scroll_up(1, evict_cb);
-            } else if (cursor_.row + 1 < rows_) {
-                cursor_.row++;
-            }
-            cursor_.col = 0;
-        }
-        wrap_next_ = false;
+        std::copy_backward(s + sx0, s + sx1, d + dx + n);
     }
 
-    // Wide character wrapping if only 1 col left on current line
-    if (width == 2 && cursor_.col >= cols_ - 1) {
-        if (auto_wrap_) {
-            // Clear current cell before wrapping
-            Cell empty_cell = cursor_.pen;
-            empty_cell.codepoint = ' ';
-            cells_[cell_index(cursor_.row, cursor_.col)] = empty_cell;
-            mark_dirty(cursor_.row);
-
-            wrapped_lines_[cursor_.row] = true;
-            if (cursor_.row == bottom_margin_) {
-                scroll_up(1, evict_cb);
-            } else if (cursor_.row + 1 < rows_) {
-                cursor_.row++;
-            }
-            cursor_.col = 0;
+    const ClusterMap* sm = clusters(sy);
+    std::vector<std::pair<int, std::u32string>> moved;
+    if (sm) {
+        for (const auto& e : sm->entries()) {
+            if (e.first >= sx0 && e.first < sx1) moved.emplace_back(e.first - sx0 + dx, e.second);
         }
     }
-
-    Cell lead = cursor_.pen;
-    lead.codepoint = codepoint;
-    lead.width = width;
-    if (width == 2) {
-        lead.set_flag(CellFlag_WideLead, true);
+    auto& dm = meta_[map_[size_t(dy)]];
+    if (dm.clusters) dm.clusters->erase_range(dx, dx + n);
+    if (!moved.empty()) {
+        ClusterMap& m = clusters_mut(dy);
+        for (auto& [c, t] : moved) m.set(c, t);
     }
-
-    cells_[cell_index(cursor_.row, cursor_.col)] = lead;
-    mark_dirty(cursor_.row);
-
-    if (width == 2 && cursor_.col + 1 < cols_) {
-        Cell trail = cursor_.pen;
-        trail.codepoint = ' ';
-        trail.width = 0;
-        trail.set_flag(CellFlag_WideTrail, true);
-        cells_[cell_index(cursor_.row, cursor_.col + 1)] = trail;
-    }
-
-    cursor_.col += width;
-    if (cursor_.col >= cols_) {
-        cursor_.col = cols_ - 1;
-        wrap_next_ = true;
-    }
+    dirty_[size_t(dy)] = 1;
 }
 
-void Grid::erase_in_line(int mode) {
-    int start_col = 0;
-    int end_col = cols_ - 1;
-
-    if (mode == 0) {
-        start_col = cursor_.col;
-    } else if (mode == 1) {
-        end_col = cursor_.col;
-    } else if (mode == 2) {
-        wrapped_lines_[cursor_.row] = false;
-    }
-
-    Cell erase_cell = cursor_.pen;
-    erase_cell.codepoint = ' ';
-    erase_cell.flags = CellFlag_None;
-
-    for (int c = start_col; c <= end_col; ++c) {
-        cells_[cell_index(cursor_.row, c)] = erase_cell;
-    }
-    mark_dirty(cursor_.row);
-}
-
-void Grid::erase_in_display(int mode, EvictLineCallback evict_cb) {
-    if (mode == 0) { // Below cursor
-        erase_in_line(0);
-        for (int r = cursor_.row + 1; r < rows_; ++r) {
-            cursor_.row = r;
-            erase_in_line(2);
-        }
-    } else if (mode == 1) { // Above cursor
-        for (int r = 0; r < cursor_.row; ++r) {
-            cursor_.row = r;
-            erase_in_line(2);
-        }
-        erase_in_line(1);
-    } else if (mode == 2 || mode == 3) { // Whole display
-        Cell erase_cell = cursor_.pen;
-        erase_cell.codepoint = ' ';
-        erase_cell.flags = CellFlag_None;
-        std::fill(cells_.begin(), cells_.end(), erase_cell);
-        std::fill(wrapped_lines_.begin(), wrapped_lines_.end(), false);
-        mark_all_dirty();
-    }
-}
-
-void Grid::erase_chars(int count) {
-    int start_col = cursor_.col;
-    int end_col = std::min(cols_ - 1, cursor_.col + count - 1);
-
-    Cell erase_cell = cursor_.pen;
-    erase_cell.codepoint = ' ';
-    erase_cell.flags = CellFlag_None;
-
-    for (int c = start_col; c <= end_col; ++c) {
-        cells_[cell_index(cursor_.row, c)] = erase_cell;
-    }
-    mark_dirty(cursor_.row);
-}
-
-void Grid::insert_lines(int count) {
-    if (cursor_.row < top_margin_ || cursor_.row > bottom_margin_) return;
-    count = std::min(count, bottom_margin_ - cursor_.row + 1);
-
-    for (int r = bottom_margin_; r >= cursor_.row + count; --r) {
-        size_t dst = cell_index(r, 0);
-        size_t src = cell_index(r - count, 0);
-        std::copy_n(cells_.begin() + src, cols_, cells_.begin() + dst);
-        wrapped_lines_[r] = wrapped_lines_[r - count];
-        mark_dirty(r);
-    }
-
-    Cell blank = cursor_.pen;
-    blank.codepoint = ' ';
-    blank.flags = CellFlag_None;
-
-    for (int r = cursor_.row; r < cursor_.row + count; ++r) {
-        size_t dst = cell_index(r, 0);
-        std::fill_n(cells_.begin() + dst, cols_, blank);
-        wrapped_lines_[r] = false;
-        mark_dirty(r);
-    }
-}
-
-void Grid::delete_lines(int count) {
-    if (cursor_.row < top_margin_ || cursor_.row > bottom_margin_) return;
-    count = std::min(count, bottom_margin_ - cursor_.row + 1);
-
-    for (int r = cursor_.row; r <= bottom_margin_ - count; ++r) {
-        size_t dst = cell_index(r, 0);
-        size_t src = cell_index(r + count, 0);
-        std::copy_n(cells_.begin() + src, cols_, cells_.begin() + dst);
-        wrapped_lines_[r] = wrapped_lines_[r + count];
-        mark_dirty(r);
-    }
-
-    Cell blank = cursor_.pen;
-    blank.codepoint = ' ';
-    blank.flags = CellFlag_None;
-
-    for (int r = bottom_margin_ - count + 1; r <= bottom_margin_; ++r) {
-        size_t dst = cell_index(r, 0);
-        std::fill_n(cells_.begin() + dst, cols_, blank);
-        wrapped_lines_[r] = false;
-        mark_dirty(r);
-    }
-}
-
-void Grid::insert_chars(int count) {
-    count = std::min(count, cols_ - cursor_.col);
-    if (count <= 0) return;
-
-    size_t row_start = cell_index(cursor_.row, 0);
-    for (int c = cols_ - 1; c >= cursor_.col + count; --c) {
-        cells_[row_start + c] = cells_[row_start + c - count];
-    }
-
-    Cell blank = cursor_.pen;
-    blank.codepoint = ' ';
-    blank.flags = CellFlag_None;
-
-    for (int c = cursor_.col; c < cursor_.col + count; ++c) {
-        cells_[row_start + c] = blank;
-    }
-    mark_dirty(cursor_.row);
-}
-
-void Grid::delete_chars(int count) {
-    count = std::min(count, cols_ - cursor_.col);
-    if (count <= 0) return;
-
-    size_t row_start = cell_index(cursor_.row, 0);
-    for (int c = cursor_.col; c < cols_ - count; ++c) {
-        cells_[row_start + c] = cells_[row_start + c + count];
-    }
-
-    Cell blank = cursor_.pen;
-    blank.codepoint = ' ';
-    blank.flags = CellFlag_None;
-
-    for (int c = cols_ - count; c < cols_; ++c) {
-        cells_[row_start + c] = blank;
-    }
-    mark_dirty(cursor_.row);
-}
-
-void Grid::scroll_up(int count, EvictLineCallback evict_cb) {
-    if (count <= 0) return;
-    int margin_height = bottom_margin_ - top_margin_ + 1;
-    count = std::min(count, margin_height);
-
-    for (int i = 0; i < count; ++i) {
-        int r = top_margin_ + i;
-        if (top_margin_ == 0 && evict_cb) {
-            evict_cb(get_line(r), wrapped_lines_[r]);
+void Grid::resize_crop(int cols, int rows) {
+    cols = std::max(1, cols);
+    rows = std::max(1, rows);
+    std::vector<Cell> cells(size_t(cols) * size_t(rows), Cell{});
+    std::vector<Meta> meta(static_cast<size_t>(rows));
+    int ncopy = std::min(cols, cols_);
+    for (int y = 0; y < std::min(rows, rows_); ++y) {
+        const Cell* src = row(y);
+        Cell* dst = &cells[size_t(y) * size_t(cols)];
+        std::copy_n(src, ncopy, dst);
+        // A wide lead cut in half at the new right edge becomes empty.
+        if (ncopy < cols_ && ncopy > 0 && dst[ncopy - 1].wide() == Wide::Lead) dst[ncopy - 1] = Cell::blank(dst[ncopy - 1].style);
+        Meta& sm = meta_[map_[size_t(y)]];
+        meta[size_t(y)].flags = sm.flags;
+        if (cols < cols_) meta[size_t(y)].flags &= ~uint32_t(Row_Wrapped);
+        if (sm.clusters && !sm.clusters->empty()) {
+            sm.clusters->erase_range(ncopy, cols_);
+            meta[size_t(y)].clusters = std::move(sm.clusters);
         }
     }
-
-    for (int r = top_margin_; r <= bottom_margin_ - count; ++r) {
-        size_t dst = cell_index(r, 0);
-        size_t src = cell_index(r + count, 0);
-        std::copy_n(cells_.begin() + src, cols_, cells_.begin() + dst);
-        wrapped_lines_[r] = wrapped_lines_[r + count];
-        mark_dirty(r);
-    }
-
-    Cell blank = cursor_.pen;
-    blank.codepoint = ' ';
-    blank.flags = CellFlag_None;
-
-    for (int r = bottom_margin_ - count + 1; r <= bottom_margin_; ++r) {
-        size_t dst = cell_index(r, 0);
-        std::fill_n(cells_.begin() + dst, cols_, blank);
-        wrapped_lines_[r] = false;
-        mark_dirty(r);
-    }
+    cols_ = cols;
+    rows_ = rows;
+    cells_ = std::move(cells);
+    meta_ = std::move(meta);
+    map_.resize(size_t(rows_));
+    for (int i = 0; i < rows_; ++i) map_[size_t(i)] = uint32_t(i);
+    dirty_.assign(size_t(rows_), 1);
 }
 
-void Grid::scroll_down(int count) {
-    if (count <= 0) return;
-    int margin_height = bottom_margin_ - top_margin_ + 1;
-    count = std::min(count, margin_height);
-
-    for (int r = bottom_margin_; r >= top_margin_ + count; --r) {
-        size_t dst = cell_index(r, 0);
-        size_t src = cell_index(r - count, 0);
-        std::copy_n(cells_.begin() + src, cols_, cells_.begin() + dst);
-        wrapped_lines_[r] = wrapped_lines_[r - count];
-        mark_dirty(r);
-    }
-
-    Cell blank = cursor_.pen;
-    blank.codepoint = ' ';
-    blank.flags = CellFlag_None;
-
-    for (int r = top_margin_; r < top_margin_ + count; ++r) {
-        size_t dst = cell_index(r, 0);
-        std::fill_n(cells_.begin() + dst, cols_, blank);
-        wrapped_lines_[r] = false;
-        mark_dirty(r);
-    }
+RowView Grid::view(int y, const Style* styles) const noexcept {
+    RowView v;
+    v.cells = row(y);
+    v.cols = cols_;
+    v.flags = flags(y);
+    v.styles = styles;
+    v.clusters = clusters(y);
+    return v;
 }
 
-void Grid::set_origin_mode(bool enabled) noexcept {
-    origin_mode_ = enabled;
-    set_cursor_pos(0, 0);
-}
-
-void Grid::resize(int new_cols, int new_rows) {
-    new_cols = std::max(1, new_cols);
-    new_rows = std::max(1, new_rows);
-
-    if (new_cols == cols_ && new_rows == rows_) {
-        return;
-    }
-
-    std::vector<Cell> new_cells(static_cast<size_t>(new_cols) * static_cast<size_t>(new_rows), kBlankCell);
-    std::vector<bool> new_wrapped(new_rows, false);
-
-    int copy_rows = std::min(rows_, new_rows);
-    int copy_cols = std::min(cols_, new_cols);
-
-    for (int r = 0; r < copy_rows; ++r) {
-        size_t old_start = static_cast<size_t>(r) * static_cast<size_t>(cols_);
-        size_t new_start = static_cast<size_t>(r) * static_cast<size_t>(new_cols);
-        std::copy_n(cells_.begin() + old_start, copy_cols, new_cells.begin() + new_start);
-        new_wrapped[r] = wrapped_lines_[r];
-    }
-
-    cols_ = new_cols;
-    rows_ = new_rows;
-    cells_ = std::move(new_cells);
-    wrapped_lines_ = std::move(new_wrapped);
-
-    top_margin_ = 0;
-    bottom_margin_ = rows_ - 1;
-
-    dirty_lines_.assign(rows_, true);
-    damage_count_ = rows_;
-
-    clamp_cursor();
-}
+void Grid::mark_all_dirty() noexcept { std::fill(dirty_.begin(), dirty_.end(), uint8_t(1)); }
+void Grid::clear_dirty() noexcept { std::fill(dirty_.begin(), dirty_.end(), uint8_t(0)); }
 
 } // namespace bropty

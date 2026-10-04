@@ -20,15 +20,21 @@ endif()
 set(BROPTY_SOURCES
     src/version.cpp
     src/color.cpp
+    src/style.cpp
     src/cell.cpp
-    src/ring_buffer.cpp
-    src/scrollback.cpp
+    src/unicode.cpp
     src/grid.cpp
-    src/vt_parser.cpp
-    src/csi_handler.cpp
-    src/osc_handler.cpp
-    src/key_encoder.cpp
+    src/logical_line.cpp
+    src/scrollback.cpp
+    src/parser.cpp
     src/terminal.cpp
+    src/terminal_csi.cpp
+    src/terminal_modes.cpp
+    src/terminal_osc.cpp
+    src/terminal_reflow.cpp
+    src/ring_buffer.cpp
+    src/key_encoder.cpp
+    src/session.cpp
     src/pty_common.cpp
 )
 
@@ -49,11 +55,23 @@ target_include_directories(bropty
         ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+if(MSVC)
+    target_compile_options(bropty PRIVATE /W4)
+else()
+    target_compile_options(bropty PRIVATE -Wall -Wextra)
+endif()
+
 if(NOT WIN32)
     find_library(UTIL_LIB util)
     if(UTIL_LIB)
         target_link_libraries(bropty PRIVATE ${UTIL_LIB})
     endif()
+endif()
+
+# Regenerates src/unicode_tables.inc from a downloaded UCD (see tools/gen_unicode.cpp).
+option(BROPTY_BUILD_TOOLS "Build the bropty maintenance tools" OFF)
+if(BROPTY_BUILD_TOOLS)
+    add_executable(bropty_gen_unicode tools/gen_unicode.cpp)
 endif()
 
 option(BROPTY_BUILD_TESTS "Build bropty test suite" ON)

@@ -21,6 +21,7 @@
 #include <util.h>
 #elif defined(__linux__)
 #include <pty.h>
+#include <utmp.h>  // login_tty (glibc)
 #endif
 
 namespace bropty {

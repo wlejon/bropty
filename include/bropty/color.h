@@ -1,87 +1,78 @@
 #pragma once
+// Colors as stored in cells (4 bytes, unresolved) and the palette that
+// resolves them. A Color is either the terminal default, one of the 256
+// palette slots, or a direct 24-bit RGB value; resolution happens at render
+// time against the terminal's live Palette (OSC 4/10/11/12 can change it).
 
+#include <array>
 #include <cstdint>
-#include <string>
-#include <string_view>
 
 namespace bropty {
-
-enum class ColorType : uint8_t {
-    Default = 0,
-    Indexed = 1,
-    Rgb = 2
-};
 
 struct Rgb {
     uint8_t r{0};
     uint8_t g{0};
     uint8_t b{0};
 
-    constexpr bool operator==(const Rgb& other) const noexcept {
-        return r == other.r && g == other.g && b == other.b;
-    }
-    constexpr bool operator!=(const Rgb& other) const noexcept {
-        return !(*this == other);
-    }
+    constexpr bool operator==(const Rgb&) const noexcept = default;
     [[nodiscard]] constexpr uint32_t to_u32() const noexcept {
-        return (static_cast<uint32_t>(r) << 16) |
-               (static_cast<uint32_t>(g) << 8) |
-               static_cast<uint32_t>(b);
+        return (uint32_t(r) << 16) | (uint32_t(g) << 8) | uint32_t(b);
     }
 };
 
 class Color {
 public:
-    constexpr Color() noexcept : type_(ColorType::Default), index_(0), rgb_{0, 0, 0} {}
+    enum class Kind : uint8_t { Default = 0, Indexed = 1, Rgb = 2 };
 
-    static constexpr Color default_color() noexcept {
-        return Color();
+    constexpr Color() noexcept = default;
+
+    static constexpr Color default_color() noexcept { return Color(); }
+    static constexpr Color indexed(uint8_t idx) noexcept { return Color(Kind::Indexed, idx, 0, 0); }
+    static constexpr Color rgb(uint8_t r, uint8_t g, uint8_t b) noexcept { return Color(Kind::Rgb, r, g, b); }
+
+    [[nodiscard]] constexpr Kind kind() const noexcept { return kind_; }
+    [[nodiscard]] constexpr bool is_default() const noexcept { return kind_ == Kind::Default; }
+    [[nodiscard]] constexpr bool is_indexed() const noexcept { return kind_ == Kind::Indexed; }
+    [[nodiscard]] constexpr bool is_rgb() const noexcept { return kind_ == Kind::Rgb; }
+    [[nodiscard]] constexpr uint8_t index() const noexcept { return a_; }
+    [[nodiscard]] constexpr Rgb rgb_value() const noexcept { return Rgb{a_, b_, c_}; }
+
+    // Packed form, used for hashing and for the compact scrollback encoding.
+    [[nodiscard]] constexpr uint32_t packed() const noexcept {
+        return (uint32_t(kind_) << 24) | (uint32_t(a_) << 16) | (uint32_t(b_) << 8) | uint32_t(c_);
+    }
+    static constexpr Color from_packed(uint32_t v) noexcept {
+        return Color(Kind((v >> 24) & 3), uint8_t(v >> 16), uint8_t(v >> 8), uint8_t(v));
     }
 
-    static constexpr Color from_index(uint8_t idx) noexcept {
-        Color c;
-        c.type_ = ColorType::Indexed;
-        c.index_ = idx;
-        return c;
-    }
-
-    static constexpr Color from_rgb(uint8_t r, uint8_t g, uint8_t b) noexcept {
-        Color c;
-        c.type_ = ColorType::Rgb;
-        c.rgb_ = {r, g, b};
-        return c;
-    }
-
-    [[nodiscard]] constexpr ColorType type() const noexcept { return type_; }
-    [[nodiscard]] constexpr bool is_default() const noexcept { return type_ == ColorType::Default; }
-    [[nodiscard]] constexpr bool is_indexed() const noexcept { return type_ == ColorType::Indexed; }
-    [[nodiscard]] constexpr bool is_rgb() const noexcept { return type_ == ColorType::Rgb; }
-
-    [[nodiscard]] constexpr uint8_t index() const noexcept { return index_; }
-    [[nodiscard]] constexpr Rgb rgb() const noexcept { return rgb_; }
-
-    constexpr bool operator==(const Color& other) const noexcept {
-        if (type_ != other.type_) return false;
-        if (type_ == ColorType::Indexed) return index_ == other.index_;
-        if (type_ == ColorType::Rgb) return rgb_ == other.rgb_;
-        return true;
-    }
-    constexpr bool operator!=(const Color& other) const noexcept {
-        return !(*this == other);
-    }
-
-    // Resolves this color to concrete RGB against standard or supplied palette
-    [[nodiscard]] Rgb resolve(bool is_fg = true, const Rgb* custom_palette_256 = nullptr) const noexcept;
-
-    // Standard 256-color palette lookup
-    static Rgb get_indexed_rgb(uint8_t index) noexcept;
-    static Rgb default_fg_rgb() noexcept;
-    static Rgb default_bg_rgb() noexcept;
+    constexpr bool operator==(const Color&) const noexcept = default;
 
 private:
-    ColorType type_{ColorType::Default};
-    uint8_t index_{0};
-    Rgb rgb_{0, 0, 0};
+    constexpr Color(Kind k, uint8_t a, uint8_t b, uint8_t c) noexcept : kind_(k), a_(a), b_(b), c_(c) {}
+    Kind kind_{Kind::Default};
+    uint8_t a_{0};
+    uint8_t b_{0};
+    uint8_t c_{0};
+};
+static_assert(sizeof(Color) == 4);
+
+// The live color table: 256 indexed colors plus the special defaults.
+struct Palette {
+    std::array<Rgb, 256> colors{};
+    Rgb foreground{204, 204, 204};
+    Rgb background{12, 12, 12};
+    Rgb cursor{204, 204, 204};
+
+    // xterm's 256-color table with a neutral 16-color base.
+    static Palette standard() noexcept;
+    static Rgb standard_index(uint8_t index) noexcept;
+
+    [[nodiscard]] Rgb resolve_fg(Color c) const noexcept {
+        return c.is_rgb() ? c.rgb_value() : c.is_indexed() ? colors[c.index()] : foreground;
+    }
+    [[nodiscard]] Rgb resolve_bg(Color c) const noexcept {
+        return c.is_rgb() ? c.rgb_value() : c.is_indexed() ? colors[c.index()] : background;
+    }
 };
 
 } // namespace bropty
