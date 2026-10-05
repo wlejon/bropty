@@ -43,6 +43,12 @@ bropty_test(test_pty_lifecycle ARGS $<TARGET_FILE:pty_child>)
 add_dependencies(test_pty pty_child)
 add_dependencies(test_pty_teardown pty_child)
 add_dependencies(test_pty_lifecycle pty_child)
+if(WIN32)
+    # Every ConPTY is a conhost (and a console on the desktop heap). The three
+    # process tests open dozens between them, so under ctest -j they take
+    # turns rather than run at once; the rest of the suite still runs alongside.
+    set_tests_properties(test_pty test_pty_teardown test_pty_lifecycle PROPERTIES RESOURCE_LOCK conpty)
+endif()
 
 # Unicode tables + UAX #29 segmentation against the official conformance file.
 bropty_test(test_unicode ARGS ${CMAKE_CURRENT_SOURCE_DIR}/data/GraphemeBreakTest.txt)

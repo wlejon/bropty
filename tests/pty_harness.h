@@ -9,7 +9,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <functional>
 #include <memory>
 #include <string>
@@ -121,11 +123,20 @@ struct Run {
             size_t n = session.update();
             if (has(needle)) return true;
             if (n == 0) {
-                if (pty->eof()) return has(needle);
+                if (pty->eof()) return has(needle) || report_crash();
                 std::this_thread::sleep_for(5ms);
             }
         }
         return has(needle);
+    }
+    // A child that crashed or never started (0xC0000142 ...) says so: with the
+    // error mode init_test() sets it exits with the status instead of waiting
+    // on a dialog. Always false (the wait failed).
+    bool report_crash() const {
+        const std::optional<int> code = pty->exit_code();
+        if (code && is_crash_status(*code))
+            std::printf("  child crashed or failed to start: exit status 0x%08X\n", unsigned(*code));
+        return false;
     }
     // Pump until the child exits and its output has all arrived.
     bool drain(std::chrono::milliseconds limit = 10000ms) {

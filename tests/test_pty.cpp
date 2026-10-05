@@ -88,6 +88,31 @@ int main(int argc, char** argv) {
         CHECK(r.pty->wait_for(10s));
         CHECK(r.pty->exit_code() == std::optional<int>(9));
     }
+#if defined(_WIN32)
+    {
+        // Children started through a ConPTY inherit the test's error mode, so
+        // one that crashes or cannot start (0xC0000142) ends with an NTSTATUS
+        // instead of holding the run on a modal dialog.
+        arm("no error dialogs", 60);
+        Run r(child({"errormode"}));
+        CHECK(r.ok);
+        CHECK(r.wait_for_text("ERRORMODE "));
+        CHECK(r.drain());
+        const std::string s = r.screen();
+        const size_t at = s.find("ERRORMODE ");
+        const unsigned long mode = at == std::string::npos ? 0 : std::strtoul(s.c_str() + at + 10, nullptr, 10);
+        CHECK((mode & SEM_FAILCRITICALERRORS) != 0);
+        CHECK((mode & SEM_NOGPFAULTERRORBOX) != 0);
+        CHECK((mode & SEM_NOOPENFILEERRORBOX) != 0);
+
+        Run c(child({"crash"}));
+        CHECK(c.ok);
+        CHECK(c.pty->wait_for(30s));
+        const std::optional<int> code = c.pty->exit_code();
+        CHECK(code.has_value() && is_crash_status(*code));
+        if (code) CHECK_EQ(unsigned(*code), 0xC0000005u);
+    }
+#endif
     {
         arm("arguments", 30);
         const std::vector<std::string> args = {"plain", "with space", "quote\"inside", "trailing\\", "x\\\\\"y z",

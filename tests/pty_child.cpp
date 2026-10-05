@@ -32,6 +32,8 @@
 //                              then sleep. how = detached (Windows:
 //                              DETACHED_PROCESS; POSIX: setsid), breakaway
 //                              (Windows: plus CREATE_BREAKAWAY_FROM_JOB)
+#include "test_common.h"
+
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -40,8 +42,6 @@
 #include <thread>
 
 #if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
 #include <windows.h>
 #else
 #include <csignal>
@@ -115,7 +115,15 @@ std::string size_text() {
 
 } // namespace
 
+#if defined(_WIN32)
+static UINT g_inherited_error_mode = 0;
+#endif
+
 int main(int argc, char** argv) {
+#if defined(_WIN32)
+    g_inherited_error_mode = GetErrorMode();  // what the parent handed down, before init_test()
+#endif
+    init_test();  // its own children (grandchild mode) inherit the error mode too
     if (argc < 2) return 2;
     std::string mode = argv[1];
     if (mode == "args") {
@@ -130,6 +138,19 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (mode == "exit") return argc > 2 ? std::atoi(argv[2]) : 0;
+#if defined(_WIN32)
+    // The error mode this process inherited.
+    if (mode == "errormode") {
+        out("ERRORMODE " + std::to_string(g_inherited_error_mode) + "\n");
+        return 0;
+    }
+    if (mode == "crash") {
+        // Must end the process with an NTSTATUS, not a "has stopped working" box.
+        volatile int* p = nullptr;
+        *p = 1;
+        return 0;
+    }
+#endif
     if (mode == "print") {
 #if defined(_WIN32)
         HANDLE o = GetStdHandle(STD_OUTPUT_HANDLE);
