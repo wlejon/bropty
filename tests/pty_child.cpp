@@ -72,11 +72,35 @@ void raw_mode() {
     SetConsoleMode(o, m | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 }
 
+// The input as UTF-8 bytes, read as UTF-16 through ReadConsoleW. Byte reads
+// (ReadFile) under input code page 65001 are broken in older console hosts:
+// Windows Server 2022's conhost returns NUL for every non-ASCII character. The
+// UTF-16 read is how console programs get Unicode input on every version, and
+// ConPTY delivers what bropty wrote either way.
 int read_byte() {
-    char c;
-    DWORD n = 0;
-    if (!ReadFile(in_handle(), &c, 1, &n, nullptr) || n == 0) return -1;
-    return static_cast<unsigned char>(c);
+    static std::string pending;
+    static size_t at = 0;
+    static wchar_t carry = 0;  // a high surrogate whose pair is still to come
+    while (at >= pending.size()) {
+        wchar_t w[65];
+        DWORD n = 0;
+        size_t have = 0;
+        if (carry) w[have++] = carry;
+        carry = 0;
+        if (!ReadConsoleW(in_handle(), w + have, DWORD(64), &n, nullptr) || n == 0) {
+            DWORD b = 0;
+            char c;  // not a console (redirected): plain bytes
+            if (have || !ReadFile(in_handle(), &c, 1, &b, nullptr) || b == 0) return -1;
+            return static_cast<unsigned char>(c);
+        }
+        have += n;
+        if (w[have - 1] >= 0xD800 && w[have - 1] <= 0xDBFF) carry = w[--have];
+        pending.assign(size_t(WideCharToMultiByte(CP_UTF8, 0, w, int(have), nullptr, 0, nullptr, nullptr)), '\0');
+        if (!pending.empty())
+            WideCharToMultiByte(CP_UTF8, 0, w, int(have), pending.data(), int(pending.size()), nullptr, nullptr);
+        at = 0;
+    }
+    return static_cast<unsigned char>(pending[at++]);
 }
 
 BOOL WINAPI stubborn_handler(DWORD) {
