@@ -102,6 +102,11 @@ public:
     // code point after construction or reset()).
     bool next(char32_t cp) noexcept;
     void reset() noexcept { *this = GraphemeSegmenter{}; }
+    // reset() then next(c) for printable ASCII c (all Grapheme_Cluster_Break=Other).
+    void reset_after_ascii() noexcept {
+        *this = GraphemeSegmenter{};
+        prev_ = static_cast<uint8_t>(GraphemeBreak::Other);
+    }
 
 private:
     uint8_t prev_ = 0xFF;   // GraphemeBreak of the previous code point; 0xFF = start

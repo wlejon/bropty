@@ -34,8 +34,12 @@ set(BROPTY_SOURCES
     src/terminal_reflow.cpp
     src/ring_buffer.cpp
     src/key_encoder.cpp
+    src/key_encoder_kitty.cpp
+    src/key_encoder_legacy.cpp
+    src/mouse_encoder.cpp
     src/session.cpp
     src/pty_common.cpp
+    src/pty_base.cpp
 )
 
 if(WIN32)
@@ -61,12 +65,8 @@ else()
     target_compile_options(bropty PRIVATE -Wall -Wextra)
 endif()
 
-if(NOT WIN32)
-    find_library(UTIL_LIB util)
-    if(UTIL_LIB)
-        target_link_libraries(bropty PRIVATE ${UTIL_LIB})
-    endif()
-endif()
+find_package(Threads REQUIRED)
+target_link_libraries(bropty PUBLIC Threads::Threads)
 
 # Regenerates src/unicode_tables.inc from a downloaded UCD (see tools/gen_unicode.cpp).
 option(BROPTY_BUILD_TOOLS "Build the bropty maintenance tools" OFF)

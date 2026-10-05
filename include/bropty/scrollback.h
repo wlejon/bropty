@@ -25,7 +25,47 @@ namespace bropty {
 
 namespace detail {
 struct LogicalLine;
-}
+
+// A growable circular buffer: deque operations without a heap allocation per
+// element (MSVC's std::deque stores one 40-byte record per block).
+template <class T>
+class Ring {
+public:
+    [[nodiscard]] size_t size() const noexcept { return count_; }
+    [[nodiscard]] bool empty() const noexcept { return count_ == 0; }
+    T& operator[](size_t i) noexcept { return buf_[(head_ + i) & (buf_.size() - 1)]; }
+    const T& operator[](size_t i) const noexcept { return buf_[(head_ + i) & (buf_.size() - 1)]; }
+    T& front() noexcept { return (*this)[0]; }
+    const T& front() const noexcept { return (*this)[0]; }
+    T& back() noexcept { return (*this)[count_ - 1]; }
+    const T& back() const noexcept { return (*this)[count_ - 1]; }
+    void push_back(const T& v) {
+        if (count_ == buf_.size()) grow();
+        buf_[(head_ + count_) & (buf_.size() - 1)] = v;
+        ++count_;
+    }
+    void pop_front() noexcept {
+        head_ = (head_ + 1) & (buf_.size() - 1);
+        --count_;
+    }
+    void pop_back() noexcept { --count_; }
+    void clear() noexcept {
+        head_ = 0;
+        count_ = 0;
+    }
+
+private:
+    void grow() {
+        std::vector<T> next(buf_.empty() ? 64 : buf_.size() * 2);
+        for (size_t i = 0; i < count_; ++i) next[i] = (*this)[i];
+        buf_ = std::move(next);
+        head_ = 0;
+    }
+    std::vector<T> buf_;
+    size_t head_{0};
+    size_t count_{0};
+};
+} // namespace detail
 
 class Scrollback {
 public:
@@ -115,7 +155,7 @@ private:
 
     size_t max_rows_;
     int cols_;
-    std::deque<Rec> recs_;
+    detail::Ring<Rec> recs_;
     std::deque<Block> blocks_;
     uint64_t block_base_{0};  // sequence number of blocks_.front()
     uint64_t next_seq_{0};

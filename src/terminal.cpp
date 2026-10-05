@@ -113,9 +113,14 @@ const Hyperlink* Terminal::hyperlink(uint32_t id) const noexcept {
 void Terminal::update_pen() {
     Cursor& c = cur();
     c.pen_id = styles_.intern(c.pen);
+    // Most SGRs leave the background alone: skip re-interning the erase style.
+    // (bce_id stays alive across style sweeps: it is a GC root.)
+    if (c.bce_valid && c.bce_bg == c.pen.bg) return;
     Style b;
     b.bg = c.pen.bg;
     c.bce_id = styles_.intern(b);
+    c.bce_bg = c.pen.bg;
+    c.bce_valid = true;
 }
 
 void Terminal::reset_margins() {
@@ -151,9 +156,11 @@ void Terminal::clear_wide_at(int y, int x) {
 }
 
 void Terminal::write_cell(int y, int x, char32_t cp, Wide w) {
-    Cell c = Cell::make(cp, cur().pen_id, w);
-    c.set_protected(cur().protect);
-    grid().row(y)[x] = c;
+    const Cursor& c = cur();
+    Cell& dst = grid().row(y)[x];
+    // Field stores (see print_ascii): no Cell temporary for MSVC to bounce through the stack.
+    dst.bits = (uint32_t(cp) & Cell::kCpMask) | (uint32_t(w) << 21) | (c.protect ? Cell::kProtectedBit : 0u);
+    dst.style = c.pen_id;
 }
 
 void Terminal::wrap_line() {
@@ -188,8 +195,17 @@ void Terminal::print_ascii(const char* s, size_t n) {
         if (r[first].wide() == Wide::SpacerTail) clear_wide_at(c.row, first);
         if (r[last].wide() == Wide::Lead) clear_wide_at(c.row, last);
         if (const ClusterMap* m = g.clusters(c.row); m && !m->empty()) g.clusters_mut(c.row).erase_range(first, last + 1);
-        uint32_t base = c.protect ? Cell::kProtectedBit : 0u;
-        for (int j = 0; j < k; ++j) r[first + j] = Cell{uint32_t(uint8_t(s[i + size_t(j)])) | base, c.pen_id};
+        const uint32_t base = c.protect ? Cell::kProtectedBit : 0u;
+        const uint32_t pen = c.pen_id;  // a local: stores to cells must not force reloads
+        Cell* dst = r + first;
+        const unsigned char* src = reinterpret_cast<const unsigned char*>(s + i);
+        // Field stores, not `dst[j] = Cell{...}`: MSVC builds the temporary on
+        // the stack and reloads it as one 64-bit value, a store-forwarding
+        // stall on every cell.
+        for (int j = 0; j < k; ++j) {
+            dst[j].bits = uint32_t(src[j]) | base;
+            dst[j].style = pen;
+        }
         g.mark_dirty(c.row);
         i += size_t(k);
         c.col += k;
@@ -214,8 +230,7 @@ void Terminal::print_ascii(const char* s, size_t n) {
     last_.cur_row = c.row;
     last_.cur_col = c.col;
     last_.cur_pending = c.pending_wrap;
-    last_.seg.reset();
-    last_.seg.next(last_.cp);
+    last_.seg.reset_after_ascii();
 }
 
 void Terminal::print(char32_t cp) {
@@ -229,21 +244,28 @@ void Terminal::print(char32_t cp) {
         else if (set == 'A' && cp == '#') cp = 0x00A3;
     }
     int w = unicode::width(cp, opts_.ambiguous_wide);
-    if (modes_.grapheme_clustering && try_extend_cluster(cp)) return;
+    // After a boundary the segmenter is in exactly the state a fresh one
+    // reaches on cp, so a new cluster can start from it without re-running it.
+    unicode::GraphemeSegmenter seg;
+    bool seg_valid = false;
+    if (modes_.grapheme_clustering && try_extend_cluster(cp, seg, seg_valid)) return;
     if (w == 0) {
         attach_zero_width(cp);
         return;
     }
-    print_cluster_start(cp, w);
+    print_cluster_start(cp, w, seg_valid ? &seg : nullptr);
 }
 
-bool Terminal::try_extend_cluster(char32_t cp) {
+bool Terminal::try_extend_cluster(char32_t cp, unicode::GraphemeSegmenter& seg, bool& seg_valid) {
     const Cursor& c = cur();
     if (!last_.valid || last_.epoch != epoch_ || c.row != last_.cur_row || c.col != last_.cur_col ||
         c.pending_wrap != last_.cur_pending)
         return false;
-    unicode::GraphemeSegmenter seg = last_.seg;
-    if (seg.next(cp)) return false;
+    seg = last_.seg;
+    if (seg.next(cp)) {
+        seg_valid = true;
+        return false;
+    }
     last_.seg = seg;
     Grid& g = grid();
     Cell& cell = g.at(last_.row, last_.col);
@@ -329,7 +351,7 @@ void Terminal::widen_last_cluster() {
     last_.cur_pending = c.pending_wrap;
 }
 
-void Terminal::print_cluster_start(char32_t cp, int w) {
+void Terminal::print_cluster_start(char32_t cp, int w, const unicode::GraphemeSegmenter* seg) {
     Cursor& c = cur();
     if (c.pending_wrap) {
         if (modes_.autowrap) wrap_line();
@@ -374,8 +396,12 @@ void Terminal::print_cluster_start(char32_t cp, int w) {
     last_.cur_row = c.row;
     last_.cur_col = c.col;
     last_.cur_pending = c.pending_wrap;
-    last_.seg.reset();
-    last_.seg.next(cp);
+    if (seg) {
+        last_.seg = *seg;
+    } else {
+        last_.seg.reset();
+        last_.seg.next(cp);
+    }
 }
 
 void Terminal::repeat_last(int n) {

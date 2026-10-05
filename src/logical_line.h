@@ -53,8 +53,12 @@ size_t count_wrapped_rows(const Cell* cells, size_t n, int cols);
 // be mistaken for cell data. Style records store only the non-default fields.
 // `cluster_at(i)` returns the cluster tail of cell i (only called for cells
 // with the cluster bit). SpacerHeads are skipped; SpacerTails are implicit.
+struct EncodeStats {
+    uint64_t columns{0};  // wide cells count 2
+    bool has_wide{false};
+};
 template <class ClusterAt>
-void encode_cells(std::string& out, const Cell* cells, size_t n, const Style* styles, ClusterAt&& cluster_at);
+EncodeStats encode_cells(std::string& out, const Cell* cells, size_t n, const Style* styles, ClusterAt&& cluster_at);
 
 // Decode, mapping each run's Style through `intern` (Style -> id).
 template <class Intern>
@@ -87,13 +91,43 @@ inline char32_t read_utf8(const uint8_t*& p, const uint8_t* end) {
     return cp;
 }
 
+inline char* put_varint(char* p, uint64_t v) {
+    while (v >= 0x80) {
+        *p++ = char(uint8_t(v) | 0x80);
+        v >>= 7;
+    }
+    *p++ = char(uint8_t(v));
+    return p;
+}
+
+// UTF-8 of a code point (callers pass valid scalar values), as append_utf8.
+inline char* put_utf8(char* p, char32_t cp) {
+    if (cp < 0x80) {
+        *p++ = char(cp);
+    } else if (cp < 0x800) {
+        *p++ = char(0xC0 | (cp >> 6));
+        *p++ = char(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        *p++ = char(0xE0 | (cp >> 12));
+        *p++ = char(0x80 | ((cp >> 6) & 0x3F));
+        *p++ = char(0x80 | (cp & 0x3F));
+    } else {
+        *p++ = char(0xF0 | (cp >> 18));
+        *p++ = char(0x80 | ((cp >> 12) & 0x3F));
+        *p++ = char(0x80 | ((cp >> 6) & 0x3F));
+        *p++ = char(0x80 | (cp & 0x3F));
+    }
+    return p;
+}
+
 Style read_style(const uint8_t*& p, const uint8_t* end);
 void write_style(std::string& out, const Style& s);
 void write_varint(std::string& out, uint64_t v);
 void write_utf8(std::string& out, char32_t cp);
 
 template <class ClusterAt>
-void encode_cells(std::string& out, const Cell* cells, size_t n, const Style* styles, ClusterAt&& cluster_at) {
+EncodeStats encode_cells(std::string& out, const Cell* cells, size_t n, const Style* styles, ClusterAt&& cluster_at) {
+    EncodeStats stats;
     size_t i = 0;
     while (i < n) {
         if (cells[i].wide() == Wide::SpacerHead || cells[i].wide() == Wide::SpacerTail) {
@@ -106,34 +140,68 @@ void encode_cells(std::string& out, const Cell* cells, size_t n, const Style* st
         uint64_t columns = 0;
         while (j < n) {
             const Cell& c = cells[j];
-            if (c.wide() == Wide::SpacerHead || c.wide() == Wide::SpacerTail) { ++j; continue; }
+            const Wide w = c.wide();
+            if (w == Wide::Narrow) {
+                if (c.style != sid) break;
+                ++columns;
+                ++j;
+                continue;
+            }
+            if (w == Wide::SpacerHead || w == Wide::SpacerTail) {
+                ++j;
+                continue;
+            }
             if (c.style != sid) break;
-            columns += (c.wide() == Wide::Lead && j + 1 < n && cells[j + 1].wide() == Wide::SpacerTail) ? 2 : 1;
+            stats.has_wide = true;
+            columns += (j + 1 < n && cells[j + 1].wide() == Wide::SpacerTail) ? 2 : 1;
             ++j;
         }
+        stats.columns += columns;
         const Style& st = styles[sid];
         bool has_style = !st.is_default();
         write_varint(out, (columns << 1) | (has_style ? 1u : 0u));
         if (has_style) write_style(out, st);
+        // Cells are written straight into space reserved for the whole run: at
+        // most 5 bytes per cell (wide prefix + 4-byte UTF-8). Only a cluster
+        // tail can need more, and it re-reserves.
+        size_t pos = out.size();
+        out.resize(pos + (j - i) * 5);
+        char* p = out.data() + pos;
+        char* limit = out.data() + out.size();
         for (size_t k = i; k < j; ++k) {
             const Cell& c = cells[k];
-            if (c.wide() == Wide::SpacerHead || c.wide() == Wide::SpacerTail) continue;
+            const uint32_t plain = c.bits & ~Cell::kProtectedBit;
+            if (plain < 0x80) {  // narrow, no cluster, ASCII or empty: one byte
+                *p++ = char(plain);
+                continue;
+            }
+            const Wide w = c.wide();
+            if (w == Wide::SpacerHead || w == Wide::SpacerTail) continue;
             if (c.is_empty()) {
-                out.push_back('\0');
+                *p++ = '\0';
                 continue;
             }
             std::u32string_view tail;
             if (c.has_cluster()) tail = cluster_at(k);
             if (!tail.empty()) {
-                out.push_back('\x02');
-                write_varint(out, tail.size());
+                size_t need = 1 + 10 + 5 + 4 * tail.size() + 5 * (j - k);
+                if (size_t(limit - p) < need) {
+                    size_t used = size_t(p - out.data());
+                    out.resize(used + need);
+                    p = out.data() + used;
+                    limit = out.data() + out.size();
+                }
+                *p++ = '\x02';
+                p = put_varint(p, tail.size());
             }
-            if (c.wide() == Wide::Lead && k + 1 < n && cells[k + 1].wide() == Wide::SpacerTail) out.push_back('\x01');
-            write_utf8(out, c.cp());
-            for (char32_t t : tail) write_utf8(out, t);
+            if (w == Wide::Lead && k + 1 < n && cells[k + 1].wide() == Wide::SpacerTail) *p++ = '\x01';
+            p = put_utf8(p, c.cp());
+            for (char32_t t : tail) p = put_utf8(p, t);
         }
+        out.resize(size_t(p - out.data()));
         i = j;
     }
+    return stats;
 }
 
 template <class Intern>

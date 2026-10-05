@@ -10,6 +10,38 @@ constexpr uint8_t kBel = 0x07;
 constexpr uint8_t kDel = 0x7F;
 constexpr char32_t kReplacement = 0xFFFD;
 
+inline bool cont(uint8_t b, uint8_t lo = 0x80, uint8_t hi = 0xBF) { return b >= lo && b <= hi; }
+
+// Decode one complete well-formed UTF-8 sequence of 2..4 bytes at p.
+inline bool decode_utf8_fast(const char* p, const char* end, size_t& len, char32_t& cp) {
+    const uint8_t b0 = uint8_t(p[0]);
+    const ptrdiff_t avail = end - p;
+    if (b0 >= 0xC2 && b0 <= 0xDF) {
+        if (avail < 2 || !cont(uint8_t(p[1]))) return false;
+        cp = char32_t(b0 & 0x1F) << 6 | (uint8_t(p[1]) & 0x3F);
+        len = 2;
+        return true;
+    }
+    if (b0 >= 0xE0 && b0 <= 0xEF) {
+        if (avail < 3) return false;
+        const uint8_t lo = b0 == 0xE0 ? 0xA0 : 0x80, hi = b0 == 0xED ? 0x9F : 0xBF;
+        if (!cont(uint8_t(p[1]), lo, hi) || !cont(uint8_t(p[2]))) return false;
+        cp = char32_t(b0 & 0x0F) << 12 | char32_t(uint8_t(p[1]) & 0x3F) << 6 | (uint8_t(p[2]) & 0x3F);
+        len = 3;
+        return true;
+    }
+    if (b0 >= 0xF0 && b0 <= 0xF4) {
+        if (avail < 4) return false;
+        const uint8_t lo = b0 == 0xF0 ? 0x90 : 0x80, hi = b0 == 0xF4 ? 0x8F : 0xBF;
+        if (!cont(uint8_t(p[1]), lo, hi) || !cont(uint8_t(p[2])) || !cont(uint8_t(p[3]))) return false;
+        cp = char32_t(b0 & 0x07) << 18 | char32_t(uint8_t(p[1]) & 0x3F) << 12 | char32_t(uint8_t(p[2]) & 0x3F) << 6 |
+             (uint8_t(p[3]) & 0x3F);
+        len = 4;
+        return true;
+    }
+    return false;
+}
+
 bool is_string_state(Parser::State s) {
     return s == Parser::State::OscString || s == Parser::State::SosPmApcString ||
            s == Parser::State::DcsPassthrough || s == Parser::State::DcsIgnore;
@@ -43,6 +75,43 @@ void Parser::feed(std::string_view bytes) {
             while (q < end && uint8_t(*q) >= 0x20 && uint8_t(*q) < 0x7F) ++q;
             if (q != p) {
                 sink_->print_ascii(p, size_t(q - p));
+                p = q;
+                continue;
+            }
+            // A complete, well-formed multi-byte sequence decodes here; anything
+            // else (truncated, ill-formed) goes through the byte-wise decoder.
+            size_t len;
+            char32_t cp;
+            if (decode_utf8_fast(p, end, len, cp)) {
+                sink_->print(cp);
+                p += len;
+                continue;
+            }
+        } else if (state_ == State::CsiParam || state_ == State::CsiEntry) {
+            // Parameter bytes, the bulk of most CSI sequences.
+            const char* q = p;
+            while (q < end && uint8_t(*q) >= '0' && uint8_t(*q) <= ';') {
+                uint8_t b = uint8_t(*q);
+                if (b > '9') {
+                    param_sep(b == ':');
+                    ++q;
+                    continue;
+                }
+                // A run of digits accumulates locally (param_digit()'s rules).
+                if (!param_started_) open_param();
+                uint32_t v = seq_.overflow ? 0u : seq_.params[seq_.count - 1];
+                while (q < end && uint8_t(*q) >= '0' && uint8_t(*q) <= '9') {
+                    v = v * 10u + uint32_t(uint8_t(*q) - '0');
+                    if (v > 0xFFFF) v = 0xFFFF;
+                    ++q;
+                }
+                if (!seq_.overflow) {
+                    seq_.params[seq_.count - 1] = uint16_t(v);
+                    seq_.present |= 1u << (seq_.count - 1);
+                }
+            }
+            if (q != p) {
+                state_ = State::CsiParam;
                 p = q;
                 continue;
             }

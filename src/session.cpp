@@ -1,5 +1,7 @@
 #include "bropty/session.h"
 
+#include <algorithm>
+
 namespace bropty {
 
 Session::Session() : Session(TerminalOptions()) {}
@@ -10,33 +12,60 @@ Session::~Session() = default;
 
 void Session::attach_pty(std::shared_ptr<IPtyProcess> pty) { pty_ = std::move(pty); }
 
-size_t Session::update() {
+size_t Session::update(const UpdateBudget& budget) {
     if (!pty_) return 0;
-    char buf[64 * 1024];
+    constexpr size_t kBuf = 64u << 10;
+    if (!read_buf_) read_buf_ = std::make_unique<char[]>(kBuf);
+    const size_t slice = std::clamp<size_t>(budget.slice, 256, kBuf);
+    const auto deadline = std::chrono::steady_clock::now() + budget.max_time;
     size_t total = 0;
-    for (;;) {
-        size_t n = pty_->read_nonblocking(buf, sizeof buf);
+    while (total < budget.max_bytes) {
+        size_t n = pty_->read_nonblocking(read_buf_.get(), std::min(slice, budget.max_bytes - total));
         if (n == 0) break;
-        term_.feed(std::string_view(buf, n));
+        term_.feed(std::string_view(read_buf_.get(), n));
         total += n;
+        if (std::chrono::steady_clock::now() >= deadline) break;
     }
     return total;
 }
 
-void Session::send_key(Key key, uint32_t codepoint, uint8_t modifiers, KeyEventType event_type) {
-    const Modes& m = term_.modes();
-    write_to_pty(KeyEncoder::encode_key(key, codepoint, modifiers, m.app_cursor_keys,
-                                        term_.kitty_keyboard_flags() != 0, event_type));
+namespace {
+bool send(Session& s, const std::string& bytes) {
+    if (bytes.empty()) return false;
+    s.write_to_pty(bytes);
+    return true;
+}
+} // namespace
+
+bool Session::send_key(const KeyEvent& ev) { return send(*this, encode_key(ev, KeyboardModes::from(term_))); }
+
+bool Session::send_text(std::string_view text) {
+    KeyEvent ev;
+    ev.text = std::string(text);
+    return send(*this, encode_key(ev, KeyboardModes::from(term_)));
 }
 
-void Session::send_text(std::string_view text) {
-    write_to_pty(KeyEncoder::encode_paste(text, term_.modes().bracketed_paste));
+bool Session::paste(std::string_view text) {
+    if (text.empty()) return false;
+    return send(*this, encode_paste(text, term_.modes().bracketed_paste));
 }
 
-void Session::send_mouse(MouseButton button, MouseAction action, uint8_t modifiers, int col, int row) {
-    if (term_.modes().mouse_tracking == MouseTracking::None) return;
-    write_to_pty(KeyEncoder::encode_mouse_sgr(button, action, modifiers, col, row));
+bool Session::send_mouse(const MouseEvent& ev) {
+    const MouseModes mm = MouseModes::from(term_);
+    if (mm.tracking == MouseTracking::None) {
+        (void)mouse_.encode(ev, mm);  // keep held-button state current
+        const bool wheel_v = ev.button == MouseButton::WheelUp || ev.button == MouseButton::WheelDown;
+        if (ev.action == MouseAction::Press && wheel_v && term_.modes().alternate_scroll &&
+            term_.alt_screen_active()) {
+            Key k = ev.button == MouseButton::WheelUp ? Key::Up : Key::Down;
+            return send_key(KeyEvent::functional(k));
+        }
+        return false;
+    }
+    return send(*this, mouse_.encode(ev, mm));
 }
+
+bool Session::focus(bool focused) { return send(*this, encode_focus(focused, term_.modes().focus_events)); }
 
 void Session::resize(int cols, int rows) {
     term_.resize(cols, rows);

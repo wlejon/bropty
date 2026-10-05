@@ -1,6 +1,7 @@
 #include "bropty/grid.h"
 
 #include <algorithm>
+#include <cstring>
 
 namespace bropty {
 
@@ -52,7 +53,14 @@ void Grid::clear_row(int y, Cell fill) {
 void Grid::rotate_up(int top, int bottom, int n) {
     if (n <= 0 || top >= bottom + 1) return;
     n = std::min(n, bottom - top + 1);
-    std::rotate(map_.begin() + top, map_.begin() + top + n, map_.begin() + bottom + 1);
+    if (n == 1) {  // the common case (one linefeed at the bottom): one memmove
+        uint32_t first = map_[size_t(top)];
+        uint32_t* m = map_.data();
+        std::memmove(m + top, m + top + 1, size_t(bottom - top) * sizeof(uint32_t));
+        map_[size_t(bottom)] = first;
+    } else {
+        std::rotate(map_.begin() + top, map_.begin() + top + n, map_.begin() + bottom + 1);
+    }
     mark_dirty(top, bottom);
 }
 

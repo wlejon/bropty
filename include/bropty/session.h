@@ -6,14 +6,12 @@
 //
 // Embedder events (bell, title, clipboard, ...) are forwarded to an optional
 // delegate TerminalHost.
-//
-// NOTE: key/mouse encoding and the PTY layer are being reworked; this class is
-// the seam they plug into (Terminal::modes(), Terminal::kitty_keyboard_flags()).
 
-#include "bropty/key_encoder.h"
+#include "bropty/input.h"
 #include "bropty/pty.h"
 #include "bropty/terminal.h"
 
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string_view>
@@ -37,15 +35,40 @@ public:
     // Observe (and, without a PTY, capture) every byte sent to the application.
     void set_output_callback(OutputCallback cb) { output_cb_ = std::move(cb); }
 
-    // Drain pending PTY output into the terminal; returns bytes processed.
-    size_t update();
+    // Feed pending PTY output into the terminal, bounded so that a fast
+    // producer cannot stall the host's frame: update() stops after
+    // `max_bytes` or once `max_time` has elapsed (checked every `slice`
+    // bytes), whichever comes first. Unconsumed output stays in the PTY's
+    // bounded buffer, which in turn stops reading from the child: the
+    // producer is throttled to the rate the host consumes. Returns the bytes
+    // processed; has_pending_output() says whether to come back sooner than
+    // the next wakeup.
+    struct UpdateBudget {
+        size_t max_bytes{16u << 20};
+        std::chrono::microseconds max_time{4000};
+        size_t slice{16u << 10};
+    };
+    size_t update() { return update(UpdateBudget()); }
+    size_t update(const UpdateBudget& budget);
+    [[nodiscard]] bool has_pending_output() const { return pty_ && pty_->available() > 0; }
     // Feed bytes directly (no PTY).
     void feed(std::string_view bytes) { term_.feed(bytes); }
 
-    void send_key(Key key, uint32_t codepoint = 0, uint8_t modifiers = Mod_None,
-                  KeyEventType event_type = KeyEventType::Press);
-    void send_text(std::string_view text);
-    void send_mouse(MouseButton button, MouseAction action, uint8_t modifiers, int col, int row);
+    // ---- input (input.h), encoded for the terminal's current modes and
+    // written to the application. Each returns whether anything was sent.
+    bool send_key(const KeyEvent& ev);
+    // Typed text with no key behind it (an IME commit). Control characters are
+    // dropped; under kitty flags 8+16 it is reported as CSI 0;;text u.
+    bool send_text(std::string_view text);
+    // Clipboard paste: bracketed (and sanitised) when ?2004 is set; see encode_paste().
+    bool paste(std::string_view text);
+    // Mouse report for the current tracking mode / encoding, with held-button
+    // tracking and same-cell motion suppression (MouseReporter). With tracking
+    // off, a wheel up/down press on the alternate screen under ?1007 sends
+    // cursor Up / Down instead (honouring DECCKM).
+    bool send_mouse(const MouseEvent& ev);
+    // Focus in / out report, only when ?1004 is set.
+    bool focus(bool focused);
     void resize(int cols, int rows);
 
     // TerminalHost
@@ -67,6 +90,8 @@ private:
     std::shared_ptr<IPtyProcess> pty_;
     TerminalHost* delegate_{nullptr};
     OutputCallback output_cb_;
+    std::unique_ptr<char[]> read_buf_;
+    MouseReporter mouse_;
 };
 
 } // namespace bropty

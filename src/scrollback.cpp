@@ -31,7 +31,7 @@ void Scrollback::append_bytes(Rec& rec, const std::string& bytes, bool new_line)
         if (blocks_.empty() || blocks_.back().cap - blocks_.back().used < add) {
             Block b;
             b.cap = uint32_t(std::max<size_t>(kBlockSize, add));
-            b.data = std::make_unique<uint8_t[]>(b.cap);
+            b.data = std::unique_ptr<uint8_t[]>(new uint8_t[b.cap]);  // not zero-filled
             blocks_.push_back(std::move(b));
         }
         Block& blk = blocks_.back();
@@ -46,7 +46,7 @@ void Scrollback::append_bytes(Rec& rec, const std::string& bytes, bool new_line)
         // Move the line to a fresh block with room to grow.
         Block nb;
         nb.cap = uint32_t(std::max<size_t>(kBlockSize, 2 * (size_t(rec.bytes) + add)));
-        nb.data = std::make_unique<uint8_t[]>(nb.cap);
+        nb.data = std::unique_ptr<uint8_t[]>(new uint8_t[nb.cap]);
         if (rec.bytes) std::memcpy(nb.data.get(), blk->data.get() + rec.offset, rec.bytes);
         nb.used = rec.bytes;
         nb.live = 1;
@@ -78,18 +78,18 @@ void Scrollback::push_row(const Cell* cells, int ncols, uint32_t row_flags, cons
     bool wrapped = (row_flags & Row_Wrapped) != 0;
     int n = ncols;
     if (!wrapped) {
-        while (n > 0 && cells[n - 1].is_empty() && cells[n - 1].style == 0 && cells[n - 1].wide() == Wide::Narrow) --n;
-    }
-    uint32_t columns = 0;
-    bool has_wide = false;
-    for (int x = 0; x < n; ++x) {
-        Wide w = cells[x].wide();
-        if (w == Wide::Lead) { has_wide = true; columns += 2; ++x; }
-        else if (w == Wide::Narrow) columns += 1;
+        // Trailing blanks: empty, narrow, default style (protection is irrelevant here).
+        constexpr uint32_t kShape = Cell::kCpMask | (3u << 21);
+        auto ink = [&](int x) { return (cells[x].bits & kShape) | cells[x].style; };
+        while (n >= 4 && (ink(n - 1) | ink(n - 2) | ink(n - 3) | ink(n - 4)) == 0) n -= 4;
+        while (n > 0 && ink(n - 1) == 0) --n;
     }
     scratch_.clear();
-    detail::encode_cells(scratch_, cells, size_t(n), styles,
-                         [&](size_t i) { return clusters ? clusters->find(int(i)) : std::u32string_view(); });
+    const detail::EncodeStats stats = detail::encode_cells(
+        scratch_, cells, size_t(n), styles,
+        [&](size_t i) { return clusters ? clusters->find(int(i)) : std::u32string_view(); });
+    const uint32_t columns = uint32_t(stats.columns);
+    const bool has_wide = stats.has_wide;
 
     const uint32_t next_wide = (wrapped && ncols > 0 && cells[ncols - 1].wide() == Wide::SpacerHead) ? kNextWide : 0u;
     bool cont = last_continued();
@@ -112,7 +112,7 @@ void Scrollback::push_row(const Cell* cells, int ncols, uint32_t row_flags, cons
         // A runaway line is split here (its tail starts a new record).
         rec.flags |= next_wide;
         if (wrapped && rec.rows < std::max<size_t>(1, max_rows_ / 2)) rec.flags |= kContinued;
-        cache_.erase(rec.seq);
+        if (!cache_.empty()) cache_.erase(rec.seq);
     } else {
         Rec rec{};
         rec.seq = next_seq_++;
@@ -185,7 +185,7 @@ void Scrollback::pop_last(LogicalLine& out, StyleTable& table) {
     blk.live--;
     if (rec.offset + rec.bytes == blk.used) blk.used -= rec.bytes;
     total_rows_ -= rec.rows;
-    cache_.erase(rec.seq);
+    if (!cache_.empty()) cache_.erase(rec.seq);
     recs_.pop_back();
     while (!blocks_.empty() && blocks_.back().live == 0 && blocks_.size() > 1) blocks_.pop_back();
     if (recs_.empty()) clear();
@@ -195,7 +195,7 @@ void Scrollback::pop_front() {
     const Rec& rec = recs_.front();
     blocks_[size_t(rec.block - block_base_)].live--;
     total_rows_ -= rec.rows;
-    cache_.erase(rec.seq);
+    if (!cache_.empty()) cache_.erase(rec.seq);
     recs_.pop_front();
     while (blocks_.size() > 1 && blocks_.front().live == 0) {
         blocks_.pop_front();
@@ -223,7 +223,8 @@ void Scrollback::set_cols(int cols) {
     cache_.clear();
     uint64_t row = recs_.empty() ? 0 : recs_.front().first_row;
     total_rows_ = 0;
-    for (Rec& rec : recs_) {
+    for (size_t i = 0; i < recs_.size(); ++i) {
+        Rec& rec = recs_[i];
         rec.first_row = row;
         rec.rows = rows_for(rec);
         row += rec.rows;
@@ -233,9 +234,14 @@ void Scrollback::set_cols(int cols) {
 }
 
 size_t Scrollback::find_line(uint64_t global_row) const {
-    auto it = std::upper_bound(recs_.begin(), recs_.end(), global_row,
-                               [](uint64_t r, const Rec& rec) { return r < rec.first_row; });
-    return size_t(it - recs_.begin()) - 1;
+    // Last line whose first_row <= global_row (upper_bound - 1).
+    size_t lo = 0, hi = recs_.size();
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (global_row < recs_[mid].first_row) hi = mid;
+        else lo = mid + 1;
+    }
+    return lo - 1;
 }
 
 const Scrollback::Decoded& Scrollback::decoded(size_t li) const {
@@ -296,7 +302,8 @@ size_t Scrollback::memory_bytes() const noexcept {
 }
 
 void Scrollback::collect_links(std::vector<uint32_t>& out) const {
-    for (const Rec& rec : recs_) {
+    for (size_t i = 0; i < recs_.size(); ++i) {
+        const Rec& rec = recs_[i];
         const uint8_t* p = blob(rec);
         detail::for_each_link(p, p + rec.bytes, [&](uint32_t id) { out.push_back(id); });
     }

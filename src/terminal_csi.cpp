@@ -90,6 +90,9 @@ void Terminal::csi_dispatch(const CsiSeq& s) {
     case key('>', 0, 'u'):
     case key('<', 0, 'u'):
     case key('=', 0, 'u'): kitty_keyboard(s); break;
+    case key('>', 0, 'm'):  // XTMODKEYS
+    case key('>', 0, 'n'):  // XTMODKEYS disable
+    case key('?', 0, 'm'): xterm_modkeys(s); break;  // XTQMODKEYS
     case key('>', 0, 'q'):
         if (s.raw(0, 0) == 0) reply(std::string("\x1bP>|bropty(") + std::string(version_string()) + ")\x1b\\");
         break;
@@ -351,6 +354,30 @@ void Terminal::kitty_keyboard(const CsiSeq& s) {
     }
 }
 
+// XTMODKEYS (CSI > Pp ; Pv m, CSI > Pp n) and XTQMODKEYS (CSI ? Pp m). Only
+// modifyOtherKeys (Pp = 4) affects bropty's encoding; the other resources keep
+// xterm's defaults. Omitting Pv (or all parameters) resets to the initial 0.
+void Terminal::xterm_modkeys(const CsiSeq& s) {
+    if (s.has_subparams()) return;
+    if (s.prefix == '?') {
+        for (int i = 0; i < s.count; ++i) {
+            if (s.raw(i, -1) == 4) reply("\x1b[>4;" + num(modes_.modify_other_keys) + "m");
+        }
+        return;
+    }
+    if (s.final == 'n') {
+        if (s.raw(0, -1) == 4) modes_.modify_other_keys = 0;
+        return;
+    }
+    if (s.count == 0) {
+        modes_.modify_other_keys = 0;
+        return;
+    }
+    if (s.raw(0, -1) != 4) return;
+    int v = s.raw(1, 0);
+    modes_.modify_other_keys = std::clamp(v, 0, 3);
+}
+
 void Terminal::window_op(const CsiSeq& s) {
     switch (s.raw(0, 0)) {
     case 14:
@@ -413,6 +440,7 @@ void Terminal::soft_reset() {
     modes_.autowrap = true;
     modes_.app_keypad = false;
     modes_.app_cursor_keys = false;
+    modes_.modify_other_keys = 0;  // xterm's ReallyReset restores the modifier resources on DECSTR too
     reset_margins();
     c.cs = Charsets{};
     c.pen = Style{};

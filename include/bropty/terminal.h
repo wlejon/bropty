@@ -115,6 +115,7 @@ struct Modes {
     bool grapheme_clustering{true};   // ?2027
     bool color_scheme_updates{false};  // ?2031
     bool in_band_resize{false};        // ?2048
+    int modify_other_keys{0};          // XTMODKEYS 4 (CSI > 4 ; Pv m): 0, 1, 2 (3 = 2)
 };
 
 struct CursorState {
@@ -199,6 +200,8 @@ private:
         Style pen;
         uint32_t pen_id{0};
         uint32_t bce_id{0};  // style for erased cells: the pen's background only
+        Color bce_bg;        // the background bce_id was made from (when bce_valid)
+        bool bce_valid{false};
         bool protect{false};
         Charsets cs;
     };
@@ -239,8 +242,9 @@ private:
     void update_pen();
     void write_cell(int y, int x, char32_t cp, Wide w);
     void clear_wide_at(int y, int x);
-    void print_cluster_start(char32_t cp, int width);
-    bool try_extend_cluster(char32_t cp);
+    // `seg`: the segmenter state after cp, when the caller already has it.
+    void print_cluster_start(char32_t cp, int width, const unicode::GraphemeSegmenter* seg = nullptr);
+    bool try_extend_cluster(char32_t cp, unicode::GraphemeSegmenter& seg, bool& seg_valid);
     void attach_zero_width(char32_t cp);
     void widen_last_cluster();
     void wrap_line();
@@ -289,6 +293,7 @@ private:
     void sgr(const CsiSeq& s);
     void designate(int slot, char final_char, char inter2);
     void kitty_keyboard(const CsiSeq& s);
+    void xterm_modkeys(const CsiSeq& s);
     void window_op(const CsiSeq& s);
     void device_status(const CsiSeq& s);
     void set_margins(int top, int bottom);
