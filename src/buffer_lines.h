@@ -99,9 +99,14 @@ struct LinePos {
     size_t offset{0};
 };
 
+// Selects BufferLines over a Terminal's primary screen and its history,
+// also while the alternate screen is showing (what reflows on a resize).
+struct PrimaryTag {};
+
 class BufferLines {
 public:
     explicit BufferLines(const RowSource& s) noexcept : s_(s), t_(s.terminal()) {}
+    BufferLines(const Terminal& t, PrimaryTag) noexcept;
 
     // Whether line numbers (and so LinePos) survive a resize of the source.
     [[nodiscard]] bool can_carry() const noexcept { return t_ != nullptr; }
@@ -129,8 +134,21 @@ public:
     // Positions <-> (line, offset), for carrying positions through a resize.
     [[nodiscard]] LinePos to_line_pos(RowPos p) const;
     [[nodiscard]] RowPos from_line_pos(const LinePos& lp) const;
+    // The same for positions that may lie past their line's content (a
+    // column beyond its last cell keeps its distance from it), clamped to a
+    // cell of `cols` columns on the way back in. For anchors that must stay
+    // put through a reflow: images, command marks.
+    [[nodiscard]] LinePos carry_out(RowPos p) const;
+    [[nodiscard]] RowPos carry_in(const LinePos& lp, int cols) const;
 
 private:
+    // The oldest row held (primary mode: history's, whichever screen shows).
+    [[nodiscard]] int64_t first_row() const noexcept;
+    // Over a Terminal: screen row y of the screen read, and whether that is
+    // the alternate screen.
+    [[nodiscard]] RowView trow(int y) const noexcept;
+    [[nodiscard]] bool alt() const noexcept;
+    [[nodiscard]] int64_t tfirst_row() const noexcept;
     // Over a Terminal (buffer_lines_term.cpp).
     [[nodiscard]] bool joint() const noexcept;  // newest history line continues onto the screen
     [[nodiscard]] int64_t screen_base_line() const noexcept;
@@ -154,6 +172,7 @@ private:
 
     const RowSource& s_;
     const Terminal* t_;
+    bool primary_{false};
 };
 
 // Hash of a row's text and wrap flag (not its styles): equal hashes mean the

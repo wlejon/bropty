@@ -49,6 +49,7 @@ void Terminal::resize(int cols, int rows) {
     ++change_count_;
     for (TerminalObserver* o : observers_) o->before_resize();
     graphics_resize_begin();
+    commands_resize_begin();
     const int64_t old_screen_top = screen_top_row();
     invalidate_print();
 
@@ -74,6 +75,7 @@ void Terminal::resize(int cols, int rows) {
     alt_.grid.rebase(reserve_stamps());
     ++numbering_;
     graphics_resize_end(old_screen_top);
+    commands_resize_end();
     maybe_collect_garbage();
     for (TerminalObserver* o : observers_) o->after_resize();
 }

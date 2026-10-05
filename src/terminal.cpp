@@ -81,6 +81,10 @@ void Terminal::reset() {
     cursor_shape_blink_ = true;
     title_stack_.clear();
     notes_pending_.clear();
+    if (!commands_.empty()) {
+        commands_.clear();
+        ++commands_version_;
+    }
     last_ = LastPrint{};
     dcs_ = Dcs::None;
     gfx_->reset();
@@ -97,6 +101,7 @@ void Terminal::feed(std::string_view bytes) {
     ++change_count_;
     parser_.feed(bytes);
     graphics_after_feed();
+    if (history_first_row() != commands_first_row_) commands_trim();
     maybe_collect_garbage();
     ++change_count_;  // observers (resize, screen switch) may have looked mid-feed
 }
@@ -506,6 +511,8 @@ void Terminal::erase_display(int mode, bool selective) {
             if (!selective) grid().set_flags(y, 0);
         }
         c.pending_wrap = false;
+        // The finished commands drawn on the screen went with its text.
+        if (!selective && active_ == &primary_) commands_screen_erased();
         // "The clear screen escape code should also clear all images" (kitty).
         if (!selective && gfx_->anchored(active_ == &alt_)) {
             gfx_->clear_rows(active_ == &alt_, screen_top_row(), end_row(), image_cell_width(),

@@ -21,6 +21,7 @@ bropty_test(test_scrollback)
 bropty_test(test_ring_buffer)
 bropty_test(test_xterm_modes)
 bropty_test(test_osc_ext)
+bropty_test(test_commands)
 
 # Input encoding: kitty keyboard protocol, xterm legacy keys + modifyOtherKeys,
 # mouse, paste / focus, and the Session wiring that picks them by mode.

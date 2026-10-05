@@ -15,7 +15,7 @@ for how it is found).
 | Header | What |
 |--------|------|
 | `bropty/parser.h` | Williams-style VT parser: strict UTF-8 (U+FFFD per maximal subpart) decoded in ground state only, flat CSI params with colon sub-parameter bits, OSC/DCS/SOS/PM/APC strings with bounded size. Feeds a `ParserSink`. |
-| `bropty/terminal.h` | The emulator (`Terminal`) and the embedder interface (`TerminalHost`: replies to the PTY, bell, title/icon, cwd, OSC 52 clipboard, notifications (OSC 9 / 777 / kitty's OSC 99), progress, OSC 133 marks, palette changes, APC, OSC 22 pointer shapes). |
+| `bropty/terminal.h` | The emulator (`Terminal`) and the embedder interface (`TerminalHost`: replies to the PTY, bell, title/icon, cwd, OSC 52 clipboard, notifications (OSC 9 / 777 / kitty's OSC 99), progress, OSC 133 marks and the command records built from them, palette changes, APC, OSC 22 pointer shapes). |
 | `bropty/cell.h` | 8-byte `Cell` (first code point, width role, cluster/protect bits, style id), per-row sparse `ClusterMap` for multi-code-point graphemes, `RowView`. |
 | `bropty/style.h`, `bropty/color.h` | Interned `Style` (colors, attributes, underline style/color, hyperlink) with a garbage-collected `StyleTable`; `Palette`. |
 | `bropty/grid.h` | Screen storage: contiguous cells plus a row-index map (scrolling rotates indices), per-row flags/clusters, dirty bits. |
@@ -78,6 +78,17 @@ id, plain or base64, title / body / urgency; `p=?` is answered) all reach
 `TerminalHost::notification_ex` as a `Notification` carrying its source;
 its default passes title and body on to the older `notification()`. Pending
 OSC 99 chunks are bounded in size and in number of ids.
+
+Shell integration: besides setting row flags and the zone of printed text
+and calling `TerminalHost::semantic_mark`, OSC 133 marks build
+`Terminal::commands()`, a list of `CommandRecord`s (prompt, input, output and
+end positions, exit code from `D;<code>`, and the command line when the shell
+sends one via kitty's `cmdline` / `cmdline_url` or VS Code's `OSC 633;E`).
+The positions are absolute and behave like a selection's: they keep their
+rows as text scrolls into history, follow their characters through a
+resize's reflow (also one made while the alternate screen shows), and records
+that leave history are dropped or trimmed. `commands_version()` changes
+with every update.
 
 `Terminal::set_base_palette` installs the host's theme: it replaces the live
 palette (dropping program OSC 4 / 10 / 11 / 12 overrides) and is what OSC 104,

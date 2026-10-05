@@ -223,6 +223,7 @@ void Terminal::osc_dispatch(std::string_view payload, bool bel) {
         if (host_) host_->palette_changed();
         break;
     case 133: osc_semantic(rest); break;
+    case 633: command_line_633(rest); break;  // VS Code: only E (the command line) is used
     case 1337:
         if (opts_.graphics.iterm2) osc_iterm(rest);
         break;
@@ -368,6 +369,7 @@ void Terminal::osc_semantic(std::string_view rest) {
         zone_ = z;
         update_pen();
     }
+    command_mark(kind, params);
     if (host_) host_->semantic_mark(kind, params);
 }
 

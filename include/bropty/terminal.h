@@ -167,6 +167,27 @@ struct TerminalOptions {
     std::string grabbed_pointer_shape{"default"};
 };
 
+// One shell command, from OSC 133 shell-integration marks on the primary
+// screen (Terminal::commands()). Positions are absolute (position.h): the
+// cursor where each mark arrived. They stay on their text as it scrolls into
+// history, and a resize carries them through the reflow to the same
+// characters.
+struct CommandRecord {
+    RowPos prompt;                 // 'A': the prompt starts
+    std::optional<RowPos> input;   // 'B': the command line starts (the prompt ends)
+    std::optional<RowPos> output;  // 'C': the command runs; its output starts
+    std::optional<RowPos> end;     // 'D': it finished
+    std::optional<int> exit_code;  // 'D;<code>'
+    // Done: 'D' arrived, or the next prompt began without one (no exit code).
+    bool finished{false};
+    // The front of the record fell off history (capacity, ED 3): positions
+    // that were evicted read as history_first_row(), column 0.
+    bool trimmed{false};
+    // The command line, when the shell says it: OSC 133;C;cmdline=<text> or
+    // cmdline_url=<percent-encoded> (kitty), or OSC 633;E;<escaped> (VS Code).
+    std::string command_line;
+};
+
 struct Hyperlink {
     std::string id;   // the OSC 8 id= parameter (may be empty)
     std::string uri;
@@ -307,6 +328,22 @@ public:
     }
     // The OSC 133 zone newly printed text gets.
     [[nodiscard]] Zone zone() const noexcept { return zone_; }
+
+    // ---- shell commands (OSC 133) ----------------------------------------------
+    // The commands run on the primary screen, oldest first; the last may be
+    // in progress (!finished). 'A' starts a record (a prompt that never got
+    // to 'C' -- an empty Enter, Ctrl+C at the prompt, a redraw -- is moved to
+    // the new prompt instead of kept as a command; secondary prompts, k=s /
+    // k=c / k=r, start none); 'B' / 'C' set the input / output starts of the
+    // record in progress; 'D[;code]' ends it. Marks while the alternate
+    // screen is showing are ignored. Records whose every position left
+    // history are dropped; erasing the whole screen (ED 2) drops the finished
+    // ones that started on it; RIS drops all. At most kMaxCommands, the
+    // oldest dropped first.
+    [[nodiscard]] const std::vector<CommandRecord>& commands() const noexcept { return commands_; }
+    // Bumped by every change to commands(), positions included.
+    [[nodiscard]] uint64_t commands_version() const noexcept { return commands_version_; }
+    static constexpr size_t kMaxCommands = 10000;
 
     // ---- change tracking for readers on the terminal's thread ----------------
     // Bumped by every feed(), resize() and reset(): nothing a reader sees
@@ -494,6 +531,13 @@ private:
     void osc_hyperlink(std::string_view payload);
     void osc_clipboard(std::string_view payload, bool bel);
     void osc_semantic(std::string_view payload);
+    // --- terminal_commands.cpp: OSC 133 command records
+    void command_mark(char kind, std::string_view params);
+    void command_line_633(std::string_view rest);  // OSC 633 ; E ; <command line>
+    void commands_trim();          // drop / trim what left history
+    void commands_screen_erased();  // ED 2 on the primary screen
+    void commands_resize_begin();
+    void commands_resize_end();
     void decrqss(std::string_view request);
     void xtgettcap(std::string_view request);
     // --- terminal_pointer.cpp: OSC 22
@@ -623,6 +667,12 @@ private:
     };
     std::vector<CarriedAnchor> carried_anchors_;
     bool image_cells_{false};
+
+    // OSC 133 command records (terminal_commands.cpp).
+    std::vector<CommandRecord> commands_;
+    uint64_t commands_version_{0};
+    int64_t commands_first_row_{0};  // history_first_row() when last trimmed
+    std::vector<CarriedAnchor> carried_commands_;
 };
 
 } // namespace bropty

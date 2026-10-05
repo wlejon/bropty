@@ -156,40 +156,15 @@ void Terminal::graphics_after_feed() {
     }
 }
 
-namespace {
-
-// A position as (line, cell offset) that may lie past the line's content.
-detail::LinePos carry_out(const detail::BufferLines& bl, int64_t row, int col) {
-    detail::Line l;
-    if (!bl.line_at_row(row, l)) return bl.to_line_pos(RowPos{row, col});
-    size_t off = l.offset_of(RowPos{row, col});
-    if (off >= l.size()) {
-        const RowPos e = l.pos_of(l.size());
-        if (e.row == row && col > e.col) off = l.size() + size_t(col - e.col);
-    }
-    return detail::LinePos{l.number, off};
-}
-
-RowPos carry_in(const detail::BufferLines& bl, const detail::LinePos& lp, int cols) {
-    detail::Line l;
-    if (lp.line < bl.first_line() || !bl.line(lp.line, l)) return bl.from_line_pos(lp);
-    RowPos p = l.pos_of(std::min(lp.offset, l.size()));
-    if (lp.offset > l.size()) p.col += int(lp.offset - l.size());
-    p.col = std::clamp(p.col, 0, cols - 1);
-    return p;
-}
-
-} // namespace
-
 void Terminal::graphics_resize_begin() {
     carried_anchors_.clear();
     if (alt_screen_active() || !gfx_->anchored(false)) return;
     detail::BufferLines bl(*this);
     gfx_->for_each_anchor(false, [&](int64_t& row, int& col, int* rows) {
-        const detail::LinePos a = carry_out(bl, row, col);
+        const detail::LinePos a = bl.carry_out(RowPos{row, col});
         carried_anchors_.push_back(CarriedAnchor{a.line, a.offset, true});
         if (rows) {
-            const detail::LinePos b = carry_out(bl, row + std::max(1, *rows) - 1, 0);
+            const detail::LinePos b = bl.carry_out(RowPos{row + std::max(1, *rows) - 1, 0});
             carried_anchors_.push_back(CarriedAnchor{b.line, b.offset, true});
         }
     });
@@ -212,7 +187,7 @@ void Terminal::graphics_resize_end(int64_t old_screen_top) {
             g.for_each_anchor(false, [&](int64_t& row, int& col, int* rows) {
                 if (i >= carried_anchors_.size()) return;
                 const CarriedAnchor a = carried_anchors_[i++];
-                const RowPos p = carry_in(bl, detail::LinePos{a.line, a.offset}, cols_);
+                const RowPos p = bl.carry_in(detail::LinePos{a.line, a.offset}, cols_);
                 row = p.row;
                 if (!rows) {
                     col = p.col;
@@ -220,7 +195,7 @@ void Terminal::graphics_resize_end(int64_t old_screen_top) {
                 }
                 if (i >= carried_anchors_.size()) return;
                 const CarriedAnchor b = carried_anchors_[i++];
-                const RowPos q = carry_in(bl, detail::LinePos{b.line, b.offset}, cols_);
+                const RowPos q = bl.carry_in(detail::LinePos{b.line, b.offset}, cols_);
                 *rows = int(std::max<int64_t>(1, q.row - p.row + 1));
             });
         }

@@ -122,8 +122,10 @@ void LineText::cells_of(const Line& line, size_t b0, size_t b1, size_t& c0, size
 
 int64_t BufferLines::first_line() const noexcept {
     if (!t_) return s_.first_row();
-    return t_->alt_screen_active() ? screen_base_line() : int64_t(t_->scrollback().dropped_lines());
+    return alt() ? screen_base_line() : int64_t(t_->scrollback().dropped_lines());
 }
+
+int64_t BufferLines::first_row() const noexcept { return t_ ? tfirst_row() : s_.first_row(); }
 
 int64_t BufferLines::end_line() const { return t_ ? term_end_line() : s_.end_row(); }
 
@@ -182,7 +184,7 @@ bool BufferLines::line(int64_t number, Line& out) const {
 }
 
 LinePos BufferLines::to_line_pos(RowPos p) const {
-    if (p.row < s_.first_row()) return LinePos{first_line() - 1, 0};
+    if (p.row < first_row()) return LinePos{first_line() - 1, 0};
     if (p.row >= s_.end_row()) return LinePos{end_line(), 0};
     Line l;
     line_at_row(p.row, l);
@@ -190,10 +192,30 @@ LinePos BufferLines::to_line_pos(RowPos p) const {
 }
 
 RowPos BufferLines::from_line_pos(const LinePos& lp) const {
-    if (lp.line < first_line()) return RowPos{s_.first_row() - 1, 0};
+    if (lp.line < first_line()) return RowPos{first_row() - 1, 0};
     Line l;
     if (!line(lp.line, l)) return RowPos{s_.end_row(), 0};
     return l.pos_of(std::min(lp.offset, l.size()));
+}
+
+LinePos BufferLines::carry_out(RowPos p) const {
+    Line l;
+    if (!line_at_row(p.row, l)) return to_line_pos(p);
+    size_t off = l.offset_of(p);
+    if (off >= l.size()) {
+        const RowPos e = l.pos_of(l.size());
+        if (e.row == p.row && p.col > e.col) off = l.size() + size_t(p.col - e.col);
+    }
+    return LinePos{l.number, off};
+}
+
+RowPos BufferLines::carry_in(const LinePos& lp, int cols) const {
+    Line l;
+    if (lp.line < first_line() || !line(lp.line, l)) return from_line_pos(lp);
+    RowPos p = l.pos_of(std::min(lp.offset, l.size()));
+    if (lp.offset > l.size()) p.col += int(lp.offset - l.size());
+    p.col = std::clamp(p.col, 0, cols - 1);
+    return p;
 }
 
 // ---------------------------------------------------------------------------
