@@ -158,6 +158,9 @@ void Session::semantic_mark(char kind, std::string_view params) {
 }
 void Session::palette_changed() { if (delegate_) delegate_->palette_changed(); }
 void Session::apc(std::string_view payload) { if (delegate_) delegate_->apc(payload); }
+bool Session::decode_image(std::string_view data, const ImageLimits& limits, DecodedImage& out) {
+    return delegate_ && delegate_->decode_image(data, limits, out);
+}
 void Session::resized_by_application(int cols, int rows) {
     push_size();
     if (delegate_) delegate_->resized_by_application(cols, rows);

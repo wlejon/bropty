@@ -48,6 +48,8 @@ void Terminal::resize(int cols, int rows) {
     if (cols == cols_ && rows == rows_) return;
     ++change_count_;
     for (TerminalObserver* o : observers_) o->before_resize();
+    graphics_resize_begin();
+    const int64_t old_screen_top = screen_top_row();
     invalidate_print();
 
     // Alternate screen: crop / pad.
@@ -70,6 +72,7 @@ void Terminal::resize(int cols, int rows) {
     alt_.grid.mark_all_dirty();
     primary_.grid.set_generation(gen_);  // the reflowed grid is new storage
     alt_.grid.set_generation(gen_);
+    graphics_resize_end(old_screen_top);
     maybe_collect_garbage();
     for (TerminalObserver* o : observers_) o->after_resize();
 }

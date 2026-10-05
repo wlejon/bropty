@@ -94,6 +94,7 @@ private:
     std::shared_ptr<const FrameRow> history_row(int64_t row);
     std::shared_ptr<FrameRow> snapshot_row(const RowView& v);
     void build_highlights(Frame& f) const;
+    void build_images(Frame& f) const;  // frame_images.cpp
     void build_damage(Frame& f) const;
 
     Terminal& t_;

@@ -115,6 +115,7 @@ public:
     void semantic_mark(char kind, std::string_view params) override;
     void palette_changed() override;
     void apc(std::string_view payload) override;
+    bool decode_image(std::string_view data, const ImageLimits& limits, DecodedImage& out) override;
     void resized_by_application(int cols, int rows) override;
 
 private:

@@ -24,10 +24,11 @@
 // it. A renderer that skips frames compares against the frame it last drew
 // instead (row_differs(), FrameRow::serial).
 //
-// Images (a later addition) join as further per-frame vectors of placements
-// anchored like highlights: absolute row/column in the buffer, converted to
-// viewport coordinates when the frame is built, with the pixel data held in
-// shared immutable objects the way rows are.
+// Images: Frame::images lists every image visible in the viewport (kitty
+// placements, and the runs of image cells sixel, iTerm2 and kitty Unicode
+// placeholders leave in the text), converted from absolute buffer positions
+// to viewport cells when the frame is built. Pixel data is shared and
+// immutable (ImagePixels): upload each buffer once, keyed by its serial.
 
 #include "bropty/cell.h"
 #include "bropty/color.h"
@@ -75,6 +76,29 @@ struct Highlight {
     bool operator==(const Highlight&) const noexcept = default;
 };
 
+// Where an image is drawn relative to the text. Kitty's z-index rules:
+// z < INT32_MIN / 2 under cell backgrounds, other negative z between the
+// backgrounds and the text, z >= 0 over the text. Image cells (sixel,
+// iTerm2, kitty placeholders) are the text: draw them in place of the glyphs
+// of the cells they cover.
+enum class ImagePlane : uint8_t { BelowBackground, BelowText, Text, AboveText };
+
+struct FrameImage {
+    ImagePixelsPtr pixels;  // the image's current frame
+    uint32_t image_id{0};   // kitty image id (0: anonymous), or the cell image id
+    uint32_t placement_id{0};
+    ImageSource source{ImageSource::Kitty};
+    ImagePlane plane{ImagePlane::AboveText};
+    int32_t z{0};
+    // Source rectangle, in pixels of `pixels`.
+    float src_x{0}, src_y{0}, src_w{0}, src_h{0};
+    // Destination in viewport cells: column x, row y (fractional: cell
+    // offsets and aspect-preserving sizes are not whole cells). May extend
+    // past the viewport; clip when drawing.
+    float x{0}, y{0}, w{0}, h{0};
+    bool operator==(const FrameImage&) const noexcept = default;
+};
+
 struct Frame {
     uint64_t seq{0};
     int cols{0};
@@ -94,6 +118,13 @@ struct Frame {
     std::shared_ptr<const Palette> palette;  // shared until it changes
 
     std::vector<Highlight> highlights;  // sorted by row, then column
+
+    // Images in drawing order: by plane, then z, then age. Laid out with
+    // the terminal's image cell size (Terminal::image_cell_width / height);
+    // a renderer with other cells scales positions and sizes alike.
+    std::vector<FrameImage> images;
+    int image_cell_width{0};
+    int image_cell_height{0};
     // Search status for the chrome.
     size_t match_count{0};
     std::optional<size_t> current_match;
@@ -105,8 +136,8 @@ struct Frame {
 
     // [first, last) indices of row y's highlights.
     [[nodiscard]] std::pair<size_t, size_t> highlights_of(int y) const noexcept;
-    // Whether row y must be redrawn relative to `drawn` (content, highlights
-    // or the cursor on it).
+    // Whether row y must be redrawn relative to `drawn` (content, highlights,
+    // the cursor or an image on it).
     [[nodiscard]] bool row_differs(const Frame& drawn, int y) const noexcept;
 };
 

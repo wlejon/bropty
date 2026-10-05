@@ -48,6 +48,21 @@ set(BROPTY_SOURCES
     src/session.cpp
     src/pty_common.cpp
     src/pty_base.cpp
+    # inline images
+    src/inflate.cpp
+    src/base64.cpp
+    src/sixel.cpp
+    src/kitty_command.cpp
+    src/placeholder.cpp
+    src/graphics_state.cpp
+    src/graphics_anchor.cpp
+    src/graphics_load.cpp
+    src/graphics_kitty.cpp
+    src/graphics_kitty_anim.cpp
+    src/graphics_sixel.cpp
+    src/graphics_iterm.cpp
+    src/graphics_cells.cpp
+    src/frame_images.cpp
 )
 
 if(WIN32)
@@ -75,6 +90,14 @@ endif()
 
 find_package(Threads REQUIRED)
 target_link_libraries(bropty PUBLIC Threads::Threads)
+# shm_open (kitty t=s) lives in librt on older glibc.
+if(UNIX AND NOT APPLE)
+    include(CheckLibraryExists)
+    check_library_exists(rt shm_open "" BROPTY_HAVE_LIBRT)
+    if(BROPTY_HAVE_LIBRT)
+        target_link_libraries(bropty PUBLIC rt)
+    endif()
+endif()
 
 # Regenerates src/unicode_tables.inc from a downloaded UCD (see tools/gen_unicode.cpp).
 option(BROPTY_BUILD_TOOLS "Build the bropty maintenance tools" OFF)

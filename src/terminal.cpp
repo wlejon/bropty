@@ -2,6 +2,8 @@
 // movement and the screen-editing primitives the CSI dispatcher builds on.
 #include "bropty/terminal.h"
 
+#include "graphics_state.h"
+
 #include <algorithm>
 #include <cstring>
 
@@ -38,7 +40,8 @@ Terminal::Terminal(const TerminalOptions& options)
       primary_(opts_.cols, opts_.rows),
       alt_(opts_.cols, opts_.rows),
       active_(&primary_),
-      scrollback_(opts_.scrollback_rows, opts_.cols) {
+      scrollback_(opts_.scrollback_rows, opts_.cols),
+      gfx_(std::make_unique<detail::Graphics>(opts_.graphics)) {
     parser_.set_max_string_bytes(opts_.max_string_bytes);
     palette_ = Palette::standard();
     reset();
@@ -74,6 +77,7 @@ void Terminal::reset() {
     title_stack_.clear();
     last_ = LastPrint{};
     dcs_ = Dcs::None;
+    gfx_->reset();
     invalidate_print();
     // Hyperlinks referenced only from history survive; the rest go at the next sweep.
     if (was_132 && cols_ != 80) {
@@ -86,6 +90,7 @@ void Terminal::reset() {
 void Terminal::feed(std::string_view bytes) {
     ++change_count_;
     parser_.feed(bytes);
+    graphics_after_feed();
     maybe_collect_garbage();
     ++change_count_;  // observers (resize, screen switch) may have looked mid-feed
 }
@@ -319,6 +324,8 @@ void Terminal::switch_screen(bool alt, bool clear_alt, bool save_restore) {
         if (alt && clear_alt) {
             for (int y = 0; y < rows_; ++y) alt_.grid.clear_row(y, Cell::blank(carried.bce_id));
         }
+        // The alternate screen's images go with its text.
+        if (clear_alt) gfx_->clear_layer(true);
         active_->grid.mark_all_dirty();
     }
     if (!alt && save_restore) restore_cursor();
@@ -365,6 +372,7 @@ void Terminal::scroll_region_up(int top, int bottom, int left, int right, int n,
     Grid& g = grid();
     Cell blank = Cell::blank(cur().bce_id);
     invalidate_print();
+    if (gfx_->anchored(active_ == &alt_)) graphics_scrolled(top, bottom, left, right, n, to_history);
     if (left == 0 && right == cols_ - 1) {
         if (to_history) {
             for (int i = 0; i < n; ++i) {
@@ -392,6 +400,7 @@ void Terminal::scroll_region_down(int top, int bottom, int left, int right, int 
     Grid& g = grid();
     Cell blank = Cell::blank(cur().bce_id);
     invalidate_print();
+    if (gfx_->anchored(active_ == &alt_)) graphics_scrolled(top, bottom, left, right, -n, false);
     if (left == 0 && right == cols_ - 1) {
         g.rotate_down(top, bottom, n);
         for (int y = top; y < top + n; ++y) g.clear_row(y, blank);
@@ -471,6 +480,11 @@ void Terminal::erase_display(int mode, bool selective) {
             if (!selective) grid().set_flags(y, 0);
         }
         c.pending_wrap = false;
+        // "The clear screen escape code should also clear all images" (kitty).
+        if (!selective && gfx_->anchored(active_ == &alt_)) {
+            gfx_->clear_rows(active_ == &alt_, screen_top_row(), end_row(), image_cell_width(),
+                             image_cell_height());
+        }
         break;
     case 3:
         scrollback_.clear();

@@ -510,7 +510,10 @@ static void hyperlinks_and_osc() {
         CHECK_EQ(t.host.notes.size(), size_t(2));
         t << "\x07";
         CHECK_EQ(t.host.bells, 1);
+        // Kitty graphics commands (APC G) are the terminal's; other APCs go to the host.
         t << "\x1b_Gi=1;AAAA\x1b\\";
+        CHECK_EQ(t.host.apcs.size(), size_t(0));
+        t << "\x1b_Xsomething\x1b\\";
         CHECK_EQ(t.host.apcs.size(), size_t(1));
     }
 }

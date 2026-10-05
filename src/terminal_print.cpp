@@ -137,6 +137,7 @@ void Terminal::print(char32_t cp) {
         attach_zero_width(cp);
         return;
     }
+    if (cp == kImagePlaceholder) image_cells_ = true;
     print_cluster_start(cp, w, seg_valid ? &seg : nullptr, p);
 }
 

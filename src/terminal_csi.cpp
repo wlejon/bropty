@@ -52,9 +52,10 @@ void Terminal::csi_dispatch(const CsiSeq& s) {
     case key(0, 0, 'X'): erase_chars(n1); break;
     case key(0, 0, 'Z'): tab_backward(n1); break;
     case key(0, 0, 'b'): repeat_last(n1); break;
-    case key(0, 0, 'c'):
-        if (s.raw(0, 0) == 0) reply("\x1b[?62;22;52c");
+    case key(0, 0, 'c'):  // DA1: VT220, ANSI color, OSC 52; sixel (4) when enabled
+        if (s.raw(0, 0) == 0) reply(opts_.graphics.sixel ? "\x1b[?62;4;22;52c" : "\x1b[?62;22;52c");
         break;
+    case key('?', 0, 'S'): xtsmgraphics(s); break;
     case key('>', 0, 'c'):
         if (s.raw(0, 0) == 0) reply("\x1b[>1;10;0c");
         break;

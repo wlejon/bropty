@@ -2,6 +2,8 @@
 // integration, DECRQSS and XTGETTCAP.
 #include "bropty/terminal.h"
 
+#include "graphics_state.h"
+
 #include <cstdio>
 #include <initializer_list>
 #include <string>
@@ -218,6 +220,9 @@ void Terminal::osc_dispatch(std::string_view payload, bool bel) {
         break;
     }
     case 133: osc_semantic(rest); break;
+    case 1337:
+        if (opts_.graphics.iterm2) osc_iterm(rest);
+        break;
     case 777: {
         std::string_view r = rest;
         if (next_field(r) == "notify" && host_) {
@@ -342,10 +347,17 @@ void Terminal::dcs_hook(const CsiSeq& seq) {
     dcs_data_.clear();
     if (seq.prefix == 0 && seq.ninter == 1 && seq.inter[0] == '$' && seq.final == 'q') dcs_ = Dcs::Decrqss;
     else if (seq.prefix == 0 && seq.ninter == 1 && seq.inter[0] == '+' && seq.final == 'q') dcs_ = Dcs::Xtgettcap;
-    else dcs_ = Dcs::Ignore;
+    else if (seq.prefix == 0 && seq.ninter == 0 && seq.final == 'q' && opts_.graphics.sixel) {
+        dcs_ = Dcs::Sixel;
+        sixel_start(seq);
+    } else dcs_ = Dcs::Ignore;
 }
 
 void Terminal::dcs_put(std::string_view data) {
+    if (dcs_ == Dcs::Sixel) {
+        if (gfx_->sixel) gfx_->sixel->feed(data);
+        return;
+    }
     if (dcs_ == Dcs::Ignore || dcs_ == Dcs::None) return;
     if (dcs_data_.size() + data.size() > 4096) {
         dcs_ = Dcs::Ignore;
@@ -358,6 +370,12 @@ void Terminal::dcs_put(std::string_view data) {
 void Terminal::dcs_unhook(bool aborted) {
     Dcs kind = dcs_;
     dcs_ = Dcs::None;
+    // A sixel image cut short (CAN, SUB, ESC) still shows what arrived, as
+    // xterm draws it while it parses.
+    if (kind == Dcs::Sixel) {
+        sixel_finish();
+        return;
+    }
     if (aborted) return;
     if (kind == Dcs::Decrqss) decrqss(dcs_data_);
     else if (kind == Dcs::Xtgettcap) xtgettcap(dcs_data_);
@@ -450,7 +468,12 @@ void Terminal::xtgettcap(std::string_view req) {
 }
 
 void Terminal::string_dispatch(StringKind kind, std::string_view payload) {
-    if (kind == StringKind::Apc && host_) host_->apc(payload);
+    if (kind != StringKind::Apc) return;
+    if (opts_.graphics.kitty && !payload.empty() && payload[0] == 'G') {
+        kitty_command(payload.substr(1));
+        return;
+    }
+    if (host_) host_->apc(payload);
 }
 
 } // namespace bropty

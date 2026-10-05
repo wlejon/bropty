@@ -64,6 +64,30 @@ bropty_test(test_frame_stress)
 find_package(Threads REQUIRED)
 target_link_libraries(test_frame_stress PRIVATE Threads::Threads)
 
+# Inline images (kitty graphics, sixel, iTerm2). Test-only references:
+# stb_image / stb_image_write (public domain; PNG / GIF decoding for the
+# host decoder, PNG / zlib encoding, and stb's inflater as the reference for
+# bropty's) and libsixel's decoder (MIT) as the reference for sixel pixels.
+add_subdirectory(third_party/libsixel)
+add_library(bropty_image_helpers STATIC image_helpers.cpp)
+target_link_libraries(bropty_image_helpers PUBLIC bropty)
+target_include_directories(bropty_image_helpers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(bropty_image_helpers PUBLIC BROPTY_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/data")
+function(bropty_image_test name)
+    bropty_test(${name} ${ARGN})
+    target_link_libraries(${name} PRIVATE bropty_image_helpers)
+endfunction()
+bropty_image_test(test_image_codecs)
+bropty_image_test(test_kitty_graphics)
+bropty_image_test(test_kitty_anim)
+bropty_image_test(test_sixel)
+target_link_libraries(test_sixel PRIVATE bropty_test_libsixel)
+bropty_image_test(test_image_anchor)
+bropty_image_test(test_iterm_images)
+# Captures of kitten icat / img2sixel / chafa / imgcat-style output, replayed
+# everywhere; POSIX also runs whichever of those programs are installed.
+bropty_image_test(test_image_programs)
+
 # Parse/emulate throughput (prints MB/s per corpus; checks only correctness).
 bropty_test(bench_throughput)
 target_link_libraries(bench_throughput PRIVATE Threads::Threads)

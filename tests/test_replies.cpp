@@ -9,10 +9,18 @@ int main() {
     init_test();
     T t(40, 10);
 
+    // 4: sixel graphics (on by default).
     t << "\x1b[c";
-    CHECK_EQ(t.reply(), std::string("\x1b[?62;22;52c"));
+    CHECK_EQ(t.reply(), std::string("\x1b[?62;4;22;52c"));
     t << "\x1b[0c\x1b[1c";
-    CHECK_EQ(t.reply(), std::string("\x1b[?62;22;52c"));
+    CHECK_EQ(t.reply(), std::string("\x1b[?62;4;22;52c"));
+    {
+        TerminalOptions o;
+        o.graphics.sixel = false;
+        T plain(o);
+        plain << "\x1b[c";
+        CHECK_EQ(plain.reply(), std::string("\x1b[?62;22;52c"));
+    }
     t << "\x1b[>c";
     CHECK_EQ(t.reply(), std::string("\x1b[>1;10;0c"));
     t << "\x1b[=c";

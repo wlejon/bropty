@@ -15,6 +15,7 @@
 
 #include "bropty/cell.h"
 #include "bropty/color.h"
+#include "bropty/graphics.h"
 #include "bropty/grid.h"
 #include "bropty/parser.h"
 #include "bropty/position.h"
@@ -22,8 +23,10 @@
 #include "bropty/style.h"
 #include "bropty/unicode.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -32,6 +35,11 @@
 #include <vector>
 
 namespace bropty {
+
+namespace detail {
+class Graphics;
+struct KittyCommand;
+}
 
 class TerminalHost {
 public:
@@ -73,8 +81,21 @@ public:
     }
     // A palette entry or default color changed (OSC 4/10/11/12/104/110..112).
     virtual void palette_changed() {}
-    // APC payload (e.g. kitty graphics protocol), raw.
+    // APC payload, raw. Kitty graphics commands (payloads starting with 'G')
+    // are handled by the terminal and not passed on, unless
+    // GraphicsOptions::kitty is off.
     virtual void apc(std::string_view payload) { (void)payload; }
+    // Decode a compressed image: PNG for kitty f=100, any format the host
+    // supports for iTerm2 inline images. Fill `out` (RGBA, one frame per
+    // animation frame) within `limits` and return true, or return false to
+    // refuse (the default: bropty links no image codecs). Called on the
+    // terminal's thread, inside feed().
+    virtual bool decode_image(std::string_view data, const ImageLimits& limits, DecodedImage& out) {
+        (void)data;
+        (void)limits;
+        (void)out;
+        return false;
+    }
     // The application changed the terminal's size itself (DECCOLM, when
     // ?40 allows it): the Terminal has already resized; the host should make
     // its window (and the pty) match.
@@ -110,7 +131,10 @@ struct TerminalOptions {
     bool ambiguous_wide{false};
     std::string answerback;                 // ENQ reply
     std::string term_name{"xterm-256color"};  // XTGETTCAP TN
-    size_t max_string_bytes{8u << 20};      // OSC / APC payload cap
+    // OSC / APC payload cap. It also bounds an iTerm2 File= image sent in one
+    // OSC (multipart transfers and kitty chunks are not affected).
+    size_t max_string_bytes{8u << 20};
+    GraphicsOptions graphics;  // inline images (graphics.h)
 };
 
 enum class CursorShape : uint8_t { Block, Underline, Bar };
@@ -157,6 +181,13 @@ struct Modes {
     int modify_modifier_keys{0};       // Pp 6
     int modify_special_keys{0};        // Pp 7
     int format_other_keys{0};          // XTFMTKEYS (CSI > 4 ; Pv f): 0 = CSI 27;m;c ~, 1 = CSI c;m u
+    // Sixel (xterm): ?80 DECSDM, sixel display mode (no scrolling: images at
+    // the top-left, the cursor stays); ?1070, a fresh palette per image
+    // (reset: registers persist between images); ?8452, the cursor ends to
+    // the right of an image instead of at its left edge (both on its last row).
+    bool sixel_display_mode{false};
+    bool sixel_private_colors{true};
+    bool sixel_cursor_right{false};
 };
 
 struct CursorState {
@@ -273,6 +304,34 @@ public:
 
     void add_observer(TerminalObserver* o);
     void remove_observer(TerminalObserver* o);
+
+    // ---- inline images (graphics.h) -------------------------------------------
+    // The images and kitty placements of the active screen / of either one.
+    [[nodiscard]] const ImageLayer& images() const noexcept { return images(alt_screen_active()); }
+    [[nodiscard]] const ImageLayer& images(bool alternate) const noexcept;
+    // Decoded bytes held for both screens (bounded by GraphicsOptions::storage_limit).
+    [[nodiscard]] size_t image_bytes() const noexcept;
+    // Changes whenever an image, a placement or an animation frame does.
+    [[nodiscard]] uint64_t images_version() const noexcept;
+    [[nodiscard]] const GraphicsOptions& graphics_options() const noexcept { return opts_.graphics; }
+    // The cell size images are laid out with: set_cell_pixel_size()'s, or
+    // GraphicsOptions' fallback while none is set.
+    [[nodiscard]] int image_cell_width() const noexcept {
+        return cell_w_ > 0 ? cell_w_ : std::max(1, opts_.graphics.fallback_cell_width);
+    }
+    [[nodiscard]] int image_cell_height() const noexcept {
+        return cell_h_ > 0 ? cell_h_ : std::max(1, opts_.graphics.fallback_cell_height);
+    }
+    // Run terminal-driven animations (kitty a=a, animated iTerm2 images) up
+    // to `now_ms` on the host's monotonic clock. Returns the milliseconds
+    // until the next frame change (UINT64_MAX when nothing is animating);
+    // the host calls it again then. A frame change counts as a change
+    // (change_count()), so the next frame shows it.
+    uint64_t advance_animations(uint64_t now_ms);
+    // Whether any cell may hold an image placeholder (U+10EEEE): one was
+    // printed or a sixel / iTerm2 image drawn. Sticky; lets readers skip
+    // looking for image cells in terminals that never had any.
+    [[nodiscard]] bool may_have_image_cells() const noexcept { return image_cells_; }
 
 private:
     struct Charsets {
@@ -415,6 +474,33 @@ private:
     // --- terminal_reflow.cpp
     void reflow_primary(int cols, int rows);
 
+    // --- graphics_kitty.cpp, graphics_kitty_anim.cpp: the kitty graphics protocol
+    void kitty_command(std::string_view payload);
+    void kitty_execute(detail::KittyCommand& c, std::vector<uint8_t>& data);
+    void kitty_respond(const detail::KittyCommand& c, uint32_t id, std::string_view result);
+    std::string kitty_transmit(const detail::KittyCommand& c, std::vector<uint8_t>& data, uint64_t& key);
+    std::string kitty_put(const detail::KittyCommand& c, uint64_t key);
+    void kitty_delete(const detail::KittyCommand& c);
+    // Sets c.rows to the frame it wrote (the reply's r=).
+    std::string kitty_frame(detail::KittyCommand& c, std::vector<uint8_t>& data);
+    std::string kitty_animate(const detail::KittyCommand& c);
+    std::string kitty_compose(const detail::KittyCommand& c);
+    // --- graphics_sixel.cpp: sixel DCS, XTSMGRAPHICS
+    void sixel_start(const CsiSeq& seq);
+    void sixel_finish();
+    void xtsmgraphics(const CsiSeq& s);
+    // --- graphics_iterm.cpp: OSC 1337 inline images
+    void osc_iterm(std::string_view rest);
+    // --- graphics_cells.cpp: images drawn as placeholder cells, and the hooks
+    // that keep kitty placements anchored to the text.
+    enum class CellCursor : uint8_t { Sixel, SixelRight, Iterm, Stay };
+    void place_cell_image(std::unique_ptr<Image> img, CellCursor cursor, bool at_origin);
+    void sweep_cell_images();
+    void graphics_scrolled(int top, int bottom, int left, int right, int n, bool to_history);
+    void graphics_after_feed();
+    void graphics_resize_begin();
+    void graphics_resize_end(int64_t old_screen_top);
+
     TerminalOptions opts_;
     TerminalHost* host_{nullptr};
     Parser parser_;
@@ -470,8 +556,18 @@ private:
     int cell_h_{0};
 
     // DCS in progress.
-    enum class Dcs : uint8_t { None, Decrqss, Xtgettcap, Ignore } dcs_{Dcs::None};
+    enum class Dcs : uint8_t { None, Decrqss, Xtgettcap, Sixel, Ignore } dcs_{Dcs::None};
     std::string dcs_data_;
+
+    // Inline images (graphics_state.h).
+    std::unique_ptr<detail::Graphics> gfx_;
+    struct CarriedAnchor {
+        int64_t line{0};
+        size_t offset{0};
+        bool valid{false};
+    };
+    std::vector<CarriedAnchor> carried_anchors_;
+    bool image_cells_{false};
 };
 
 } // namespace bropty

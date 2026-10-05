@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace check {
 
@@ -40,6 +41,12 @@ inline std::string show(char32_t c) {
     char buf[16];
     std::snprintf(buf, sizeof buf, "U+%04X", unsigned(c));
     return buf;
+}
+template <class T>
+std::string show(const T& v);
+template <class A, class B>
+std::string show(const std::pair<A, B>& p) {
+    return "(" + show(p.first) + ", " + show(p.second) + ")";
 }
 template <class T>
 std::string show(const T& v) {

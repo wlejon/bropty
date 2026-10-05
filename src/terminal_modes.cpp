@@ -84,6 +84,9 @@ void Terminal::set_private_mode(int mode, bool on) {
         invalidate_print();
         break;
     case 2031: modes_.color_scheme_updates = on; break;
+    case 80: modes_.sixel_display_mode = on; break;
+    case 1070: modes_.sixel_private_colors = on; break;
+    case 8452: modes_.sixel_cursor_right = on; break;
     case 2048:
         modes_.in_band_resize = on;
         if (on) {
@@ -143,6 +146,9 @@ int Terminal::private_mode_state(int mode) const {
     case 2027: return b(modes_.grapheme_clustering);
     case 2031: return b(modes_.color_scheme_updates);
     case 2048: return b(modes_.in_band_resize);
+    case 80: return opts_.graphics.sixel ? b(modes_.sixel_display_mode) : 0;
+    case 1070: return opts_.graphics.sixel ? b(modes_.sixel_private_colors) : 0;
+    case 8452: return opts_.graphics.sixel ? b(modes_.sixel_cursor_right) : 0;
     default: return 0;
     }
 }

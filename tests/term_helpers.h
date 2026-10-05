@@ -52,6 +52,7 @@ struct T {
     T(int cols, int rows, size_t sb = 1000, bool clusters = true) : t(opts(cols, rows, sb, clusters)) {
         t.set_host(&host);
     }
+    explicit T(const bropty::TerminalOptions& o) : t(o) { t.set_host(&host); }
     T& operator<<(std::string_view s) {
         t.feed(s);
         return *this;

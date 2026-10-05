@@ -46,6 +46,13 @@ bool Frame::row_differs(const Frame& drawn, int y) const noexcept {
             cursor.shape != drawn.cursor.shape || cursor.blink != drawn.cursor.blink)
             return true;
     }
+    if (images != drawn.images) {
+        // Conservative: a row any image of either frame touches is redrawn.
+        auto touches = [y](const FrameImage& i) { return float(y) < i.y + i.h && float(y + 1) > i.y; };
+        if (std::any_of(images.begin(), images.end(), touches) ||
+            std::any_of(drawn.images.begin(), drawn.images.end(), touches))
+            return true;
+    }
     return false;
 }
 
@@ -184,6 +191,7 @@ std::shared_ptr<Frame> TerminalView::build() {
         palette_ = std::make_shared<const Palette>(p);
     f->palette = palette_;
     build_highlights(*f);
+    build_images(*f);
     f->search_active = search_.active();
     f->search_complete = search_.complete();
     f->match_count = search_.size();
