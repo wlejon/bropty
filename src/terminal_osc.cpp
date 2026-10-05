@@ -4,6 +4,7 @@
 
 #include "graphics_state.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <initializer_list>
 #include <string>
@@ -311,6 +312,12 @@ void Terminal::osc_clipboard(std::string_view rest, bool bel) {
     std::string_view data = rest.substr(semi + 1);
     if (!host_) return;
     if (data == "?") {
+        const uint64_t id = next_clip_++;
+        if (host_->clipboard_read_async(id, sel)) {
+            if (clip_pending_.size() >= kMaxClipboardRequests) clip_pending_.erase(clip_pending_.begin());
+            clip_pending_.push_back(ClipQuery{id, std::string(sel), bel});
+            return;
+        }
         if (auto content = host_->clipboard_read(sel)) {
             reply("\x1b]52;" + std::string(sel) + ";" + base64_encode(*content) + (bel ? "\x07" : "\x1b\\"));
         }
@@ -318,6 +325,24 @@ void Terminal::osc_clipboard(std::string_view rest, bool bel) {
     }
     std::string decoded;
     if (base64_decode(data, decoded)) host_->clipboard_write(sel, decoded);
+}
+
+bool Terminal::answer_clipboard(uint64_t request, std::string_view data) {
+    auto it = std::find_if(clip_pending_.begin(), clip_pending_.end(),
+                           [request](const ClipQuery& q) { return q.id == request; });
+    if (it == clip_pending_.end()) return false;
+    const ClipQuery q = std::move(*it);
+    clip_pending_.erase(it);
+    reply("\x1b]52;" + q.selection + ";" + base64_encode(data) + (q.bel ? "\x07" : "\x1b\\"));
+    return true;
+}
+
+bool Terminal::cancel_clipboard(uint64_t request) {
+    auto it = std::find_if(clip_pending_.begin(), clip_pending_.end(),
+                           [request](const ClipQuery& q) { return q.id == request; });
+    if (it == clip_pending_.end()) return false;
+    clip_pending_.erase(it);
+    return true;
 }
 
 void Terminal::osc_semantic(std::string_view rest) {

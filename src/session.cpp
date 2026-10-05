@@ -28,7 +28,9 @@ size_t Session::update(const UpdateBudget& budget) {
     while (total < budget.max_bytes) {
         size_t n = pty_->read_nonblocking(read_buf_.get(), std::min(slice, budget.max_bytes - total));
         if (n == 0) break;
-        term_.feed(std::string_view(read_buf_.get(), n));
+        const std::string_view chunk(read_buf_.get(), n);
+        if (feed_tap_) feed_tap_(chunk);
+        term_.feed(chunk);
         total += n;
         if (std::chrono::steady_clock::now() >= deadline) break;
     }
@@ -148,6 +150,9 @@ void Session::clipboard_write(std::string_view sel, std::string_view data) {
 }
 std::optional<std::string> Session::clipboard_read(std::string_view sel) {
     return delegate_ ? delegate_->clipboard_read(sel) : std::nullopt;
+}
+bool Session::clipboard_read_async(uint64_t request, std::string_view sel) {
+    return delegate_ && delegate_->clipboard_read_async(request, sel);
 }
 void Session::notification(std::string_view title, std::string_view body) {
     if (delegate_) delegate_->notification(title, body);

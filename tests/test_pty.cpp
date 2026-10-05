@@ -333,6 +333,57 @@ int main(int argc, char** argv) {
         CHECK(p->eof());
         CHECK(wakes.load() >= 2);  // output, exit
     }
+    {
+        // The output tap sees exactly what update() feeds the terminal:
+        // replaying the chunks into a fresh terminal (with the same resize
+        // between them) reproduces its screen and history; the chunk sizes
+        // add up to what update() reported.
+        arm("feed tap", 60);
+        Run r(child({"flood", "300000"}), 70, 12);
+        CHECK(r.ok);
+        std::vector<std::string> chunks;  // "" marks the resize
+        size_t tapped = 0;
+        r.session.set_feed_tap([&](std::string_view b) {
+            CHECK(!b.empty());
+            chunks.emplace_back(b);
+            tapped += b.size();
+        });
+        Session::UpdateBudget small;
+        small.max_bytes = 3000;  // many slices, split anywhere
+        small.slice = 700;
+        size_t fed = 0;
+        bool resized = false;
+        auto end = Clock::now() + 40s;
+        while (Clock::now() < end) {
+            const size_t n = r.session.update(small);
+            fed += n;
+            if (!resized && fed > 100000) {
+                r.session.resize(53, 9);
+                chunks.emplace_back();
+                resized = true;
+            }
+            if (r.has("FLOOD-DONE")) break;
+            if (n == 0) {
+                if (r.pty->eof() && r.pty->available() == 0) break;
+                std::this_thread::sleep_for(2ms);
+            }
+        }
+        CHECK(r.has("FLOOD-DONE"));
+        CHECK(resized);
+        CHECK_EQ(tapped, fed);
+        CHECK(chunks.size() > 100);
+        Terminal replay(Run::opts(70, 12));
+        for (const std::string& c : chunks) {
+            if (c.empty()) replay.resize(53, 9);
+            else replay.feed(c);
+        }
+        CHECK_EQ(text(replay), r.screen());
+        // Session::feed() goes through the tap as well.
+        size_t direct = 0;
+        r.session.set_feed_tap([&](std::string_view b) { direct += b.size(); });
+        r.session.feed("abc");
+        CHECK_EQ(direct, size_t(3));
+    }
 
     g_deadline_ms = 0;
     return check::finish("test_pty");

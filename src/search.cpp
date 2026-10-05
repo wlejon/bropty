@@ -1,6 +1,5 @@
 #include "bropty/search.h"
 
-#include "bropty/terminal.h"
 #include "buffer_lines.h"
 
 #include <algorithm>
@@ -54,6 +53,21 @@ void fold_utf8(std::string& s) {
     }
 }
 
+// Match one line into `out`.
+void match_text(SearchMatcher& m, const Line& l, std::vector<std::pair<size_t, size_t>>& scratch,
+                std::vector<RowRange>& out) {
+    LineText lt;
+    lt.build(l);
+    scratch.clear();
+    m.find(lt.text, scratch);
+    for (const auto& [b0, b1] : scratch) {
+        if (b1 <= b0 || b1 > lt.text.size()) continue;
+        size_t c0, c1;
+        lt.cells_of(l, b0, b1, c0, c1);
+        out.push_back(RowRange{l.pos_of(c0), l.end_pos(c1)});
+    }
+}
+
 } // namespace
 
 LiteralMatcher::LiteralMatcher(std::string_view needle, bool case_sensitive)
@@ -79,12 +93,14 @@ void LiteralMatcher::find(std::string_view line, std::vector<std::pair<size_t, s
 // ---------------------------------------------------------------------------
 // Search
 
-Search::Search(const Terminal& t) : t_(t) {}
+Search::Search(const RowSource& source) : t_(source) {}
 
 void Search::clear() {
     matcher_.reset();
     frozen_.clear();
     live_.clear();
+    gaps_.clear();
+    waiting_ = false;
     current_.reset();
     carried_.clear();
     carried_current_.reset();
@@ -104,25 +120,27 @@ void Search::start(std::shared_ptr<SearchMatcher> matcher) {
     matcher_ = std::move(matcher);
     BufferLines bl(t_);
     rescan_live(bl.screen_first_line());
-    scan_next_ = live_line_ - 1;
+    scan_next_ = bl.prev_line(live_line_);
     scan_floor_ = bl.first_line();
     seen_change_ = t_.change_count();
 }
 
-void Search::match_line(int64_t number, std::vector<RowRange>& out) {
+bool Search::match_line(int64_t number, std::vector<RowRange>& out, int64_t* prev, int64_t* next) {
     BufferLines bl(t_);
     Line l;
-    if (!bl.line(number, l)) return;
-    LineText lt;
-    lt.build(l);
-    scratch_.clear();
-    matcher_->find(lt.text, scratch_);
-    for (const auto& [b0, b1] : scratch_) {
-        if (b1 <= b0 || b1 > lt.text.size()) continue;
-        size_t c0, c1;
-        lt.cells_of(l, b0, b1, c0, c1);
-        out.push_back(RowRange{l.pos_of(c0), l.end_pos(c1)});
+    if (!bl.line(number, l)) {
+        if (prev) *prev = bl.prev_line(number);
+        if (next) *next = bl.next_line(number);
+        return true;
     }
+    if (prev) *prev = bl.prev_line(l);
+    if (next) *next = bl.next_line(l);
+    if (l.missing) {
+        t_.request_rows(l.first_row, l.end_row());
+        return false;
+    }
+    match_text(*matcher_, l, scratch_, out);
+    return true;
 }
 
 void Search::rescan_live(int64_t from_line) {
@@ -132,23 +150,50 @@ void Search::rescan_live(int64_t from_line) {
     Line l;
     int64_t row = bl.line_first_row(from_line);
     while (row < t_.end_row() && bl.line_at_row(row, l)) {
-        LineText lt;
-        lt.build(l);
-        scratch_.clear();
-        matcher_->find(lt.text, scratch_);
-        for (const auto& [b0, b1] : scratch_) {
-            if (b1 <= b0 || b1 > lt.text.size()) continue;
-            size_t c0, c1;
-            lt.cells_of(l, b0, b1, c0, c1);
-            live_.push_back(RowRange{l.pos_of(c0), l.end_pos(c1)});
-        }
+        // A live line starting in history the source does not hold yet:
+        // what it has is matched now, the rest once it arrives (a change).
+        if (l.missing) t_.request_rows(l.first_row, l.end_row());
+        match_text(*matcher_, l, scratch_, live_);
         row = l.end_row();
     }
     ++version_;
 }
 
+void Search::insert_frozen(const std::vector<RowRange>& found) {
+    for (const RowRange& r : found) {
+        auto it = std::lower_bound(frozen_.begin(), frozen_.end(), r,
+                                   [](const RowRange& a, const RowRange& b) { return a.start < b.start; });
+        frozen_.insert(it, r);
+    }
+    if (!found.empty()) ++version_;
+}
+
+bool Search::fill_gaps() {
+    BufferLines bl(t_);
+    const int64_t floor = bl.first_line();
+    std::vector<RowRange> found;
+    while (!gaps_.empty()) {
+        auto& [from, to] = gaps_.back();
+        from = std::max(from, floor);
+        while (from < to) {
+            found.clear();
+            int64_t next = from + 1;
+            if (!match_line(from, found, nullptr, &next)) return false;
+            insert_frozen(found);
+            from = std::max(next, from + 1);
+        }
+        gaps_.pop_back();
+    }
+    return true;
+}
+
 bool Search::step(std::chrono::microseconds budget) {
     if (take_cancel() || !matcher_) return false;
+    waiting_ = false;
+    if (!fill_gaps()) {
+        waiting_ = true;
+        return true;
+    }
     BufferLines bl(t_);
     scan_floor_ = bl.first_line();
     if (scan_next_ < scan_floor_) return false;
@@ -157,10 +202,14 @@ bool Search::step(std::chrono::microseconds budget) {
     int n = 0;
     while (scan_next_ >= scan_floor_) {
         found.clear();
-        match_line(scan_next_, found);
+        int64_t prev = scan_next_ - 1;
+        if (!match_line(scan_next_, found, &prev, nullptr)) {
+            waiting_ = true;
+            return true;
+        }
         for (auto it = found.rbegin(); it != found.rend(); ++it) frozen_.push_front(*it);
         if (!found.empty()) ++version_;
-        --scan_next_;
+        scan_next_ = std::min(prev, scan_next_ - 1);
         if ((++n & 15) == 0) {
             if (cancel_.load(std::memory_order_relaxed)) return !take_cancel();
             if (std::chrono::steady_clock::now() >= deadline) break;
@@ -177,16 +226,27 @@ void Search::sync() {
     const int64_t first_row = t_.first_row();
     while (!frozen_.empty() && frozen_.front().start.row < first_row) frozen_.pop_front();
     scan_floor_ = bl.first_line();
+    for (auto& g : gaps_) g.first = std::max(g.first, scan_floor_);
+    gaps_.erase(std::remove_if(gaps_.begin(), gaps_.end(), [](const auto& g) { return g.first >= g.second; }),
+                gaps_.end());
     const int64_t live = bl.screen_first_line();
     if (live < live_line_) {
         // Lines came back to the screen (not by output; defensive).
         const int64_t row = bl.line_first_row(live);
         while (!frozen_.empty() && frozen_.back().start.row >= row) frozen_.pop_back();
-        scan_next_ = std::min(scan_next_, live - 1);
+        scan_next_ = std::min(scan_next_, bl.prev_line(live));
     }
-    // Lines that left the screen since the last sync: matched once, for good.
+    // Lines that left the screen since the last sync: matched once, for good
+    // (or, when the source does not hold them yet, as soon as it does).
     std::vector<RowRange> fresh;
-    for (int64_t n = std::max(live_line_, scan_floor_); n < live; ++n) match_line(n, fresh);
+    for (int64_t n = std::max(live_line_, scan_floor_); n < live;) {
+        int64_t next = n + 1;
+        if (!match_line(n, fresh, nullptr, &next)) {
+            gaps_.emplace_back(n, live);
+            break;
+        }
+        n = std::max(next, n + 1);
+    }
     for (const RowRange& r : fresh) frozen_.push_back(r);
     rescan_live(live);
     refresh_current();
@@ -242,7 +302,8 @@ std::optional<RowRange> Search::next(bool backward, RowPos from) {
 }
 
 // ---------------------------------------------------------------------------
-// Resize: carry matches as (line, cell offsets).
+// Resize: carry matches as (line, cell offsets). A source that is not a
+// Terminal cannot carry them: the search starts over.
 
 void Search::before_resize() {
     carried_.clear();
@@ -250,9 +311,10 @@ void Search::before_resize() {
     sync();  // the screen's matches must describe what is about to be reflowed
     if (!matcher_) return;
     BufferLines bl(t_);
+    if (!bl.can_carry()) return;
     Line l;
     bool have = false;
-    auto carry =[&](const RowRange& r) -> std::optional<Pending> {
+    auto carry = [&](const RowRange& r) -> std::optional<Pending> {
         if (!have || r.start.row < l.first_row || r.start.row >= l.end_row()) {
             have = bl.line_at_row(r.start.row, l);
             if (!have) return std::nullopt;
@@ -270,6 +332,10 @@ void Search::before_resize() {
 void Search::after_resize() {
     if (!matcher_) return;
     BufferLines bl(t_);
+    if (!bl.can_carry()) {
+        start(matcher_);
+        return;
+    }
     Line l;
     bool have = false;
     auto place = [&](const Pending& p) -> std::optional<RowRange> {

@@ -139,12 +139,14 @@ size_t path_end(std::string_view s, size_t b, size_t e, size_t& core_end) {
     return e;
 }
 
-void add_osc8(const Terminal& t, const Line& l, size_t a, size_t b, uint32_t id, std::vector<LinkHit>& out) {
+// An OSC 8 link. link_id is the source's own id when the line uses the
+// source's id space (a Terminal), else 0.
+void add_osc8(const Line& l, size_t a, size_t b, uint32_t id, std::vector<LinkHit>& out) {
     LinkHit h;
     h.range = RowRange{l.pos_of(a), l.end_pos(b)};
     h.kind = LinkKind::Hyperlink;
-    h.link_id = id;
-    if (const Hyperlink* link = t.hyperlink(id)) h.target = link->uri;
+    h.link_id = l.local_links ? 0 : id;
+    if (const std::string* uri = l.link_uri(id)) h.target = *uri;
     out.push_back(std::move(h));
 }
 
@@ -161,10 +163,10 @@ void for_each_osc8(const Line& l, F&& f) {
     }
 }
 
-void line_links(const Terminal& t, const Line& l, std::vector<LinkHit>& out) {
+void line_links(const Line& l, std::vector<LinkHit>& out) {
     std::vector<std::pair<size_t, size_t>> osc;
     for_each_osc8(l, [&](size_t a, size_t b, uint32_t id) {
-        add_osc8(t, l, a, b, id, out);
+        add_osc8(l, a, b, id, out);
         osc.emplace_back(a, b);
     });
     LineText lt;
@@ -217,7 +219,7 @@ void detect_links(std::string_view s, std::vector<TextLink>& out) {
     std::sort(out.begin(), out.end(), [](const TextLink& a, const TextLink& b) { return a.begin < b.begin; });
 }
 
-std::optional<LinkHit> link_at(const Terminal& t, RowPos cell) {
+std::optional<LinkHit> link_at(const RowSource& t, RowPos cell) {
     BufferLines bl(t);
     Line l;
     if (!bl.line_at_row(cell.row, l)) return std::nullopt;
@@ -229,22 +231,22 @@ std::optional<LinkHit> link_at(const Terminal& t, RowPos cell) {
         size_t a = o, b = o + 1;
         while (a > 0 && l.style(a - 1).link == id) --a;
         while (b < l.size() && l.style(b).link == id) ++b;
-        add_osc8(t, l, a, b, id, hits);
+        add_osc8(l, a, b, id, hits);
         return hits.front();
     }
-    line_links(t, l, hits);
+    line_links(l, hits);
     const RowPos at = l.pos_of(o);
     for (LinkHit& h : hits)
         if (h.kind != LinkKind::Hyperlink && h.range.contains(at.row, at.col)) return std::move(h);
     return std::nullopt;
 }
 
-void links_in_rows(const Terminal& t, int64_t row0, int64_t row1, std::vector<LinkHit>& out) {
+void links_in_rows(const RowSource& t, int64_t row0, int64_t row1, std::vector<LinkHit>& out) {
     BufferLines bl(t);
     Line l;
     int64_t row = std::max(row0, t.first_row());
     while (row < row1 && bl.line_at_row(row, l)) {
-        line_links(t, l, out);
+        line_links(l, out);
         row = l.end_row();
     }
 }

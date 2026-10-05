@@ -44,6 +44,8 @@ Terminal::Terminal(const TerminalOptions& options)
       gfx_(std::make_unique<detail::Graphics>(opts_.graphics)) {
     parser_.set_max_string_bytes(opts_.max_string_bytes);
     palette_ = Palette::standard();
+    primary_.grid.rebase(reserve_stamps());
+    alt_.grid.rebase(reserve_stamps());
     reset();
 }
 
@@ -102,12 +104,24 @@ RowView Terminal::row_at(int64_t abs) const {
     return scrollback_.row(size_t(abs - first_row()));
 }
 
-void Terminal::add_observer(TerminalObserver* o) {
+void RowSource::add_observer(TerminalObserver* o) {
     if (o && std::find(observers_.begin(), observers_.end(), o) == observers_.end()) observers_.push_back(o);
 }
 
-void Terminal::remove_observer(TerminalObserver* o) {
+void RowSource::remove_observer(TerminalObserver* o) {
     observers_.erase(std::remove(observers_.begin(), observers_.end(), o), observers_.end());
+}
+
+void RowSource::notify_before_resize() {
+    for (TerminalObserver* o : observers_) o->before_resize();
+}
+
+void RowSource::notify_after_resize() {
+    for (TerminalObserver* o : observers_) o->after_resize();
+}
+
+void RowSource::notify_screen_switched() {
+    for (TerminalObserver* o : observers_) o->screen_switched();
 }
 
 CursorState Terminal::cursor() const noexcept {

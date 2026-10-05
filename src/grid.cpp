@@ -22,14 +22,20 @@ uint64_t Grid::next_id() noexcept {
     return counter.fetch_add(1, std::memory_order_relaxed);
 }
 
-void Grid::set_generation(uint64_t g) noexcept {
+void Grid::set_generation(uint64_t base) noexcept {
     for (int y = 0; y < rows_; ++y) {
         if (changed_[size_t(y)]) {
-            stamp_[map_[size_t(y)]] = gen_;
+            const uint32_t s = map_[size_t(y)];
+            stamp_[s] = base_ + s;
             changed_[size_t(y)] = 0;
         }
     }
-    gen_ = g;
+    base_ = base;
+}
+
+void Grid::rebase(uint64_t base) noexcept {
+    std::fill(changed_.begin(), changed_.end(), uint8_t(1));
+    base_ = base;
 }
 
 ClusterMap& Grid::clusters_mut(int y) {

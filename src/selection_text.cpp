@@ -15,9 +15,11 @@ using detail::Line;
 namespace {
 
 // Receives the selected text in order, in runs of one style.
+// Receives the selected text in order, in runs of one style (`uri`: the
+// style's OSC 8 link target, or nullptr).
 struct Sink {
     virtual ~Sink() = default;
-    virtual void run(std::string_view utf8, const Style& s) = 0;
+    virtual void run(std::string_view utf8, const Style& s, const std::string* uri) = 0;
     virtual void newline() = 0;
 };
 
@@ -25,23 +27,51 @@ struct PlainSink final : Sink {
     std::string out;
     std::string_view nl;
     explicit PlainSink(std::string_view n) : nl(n) {}
-    void run(std::string_view utf8, const Style&) override { out.append(utf8); }
+    void run(std::string_view utf8, const Style&, const std::string*) override { out.append(utf8); }
     void newline() override { out.append(nl); }
 };
 
+// Cells extraction drops from the end of a line when trimming: blanks, and
+// image cells (a picture has no text).
+bool trailing_blank(const Cell& c) noexcept {
+    return c.is_empty() || (c.cp() == U' ' && !c.has_cluster()) || detail::is_image_cell(c);
+}
+
+// One past the last cell of a line with text in it.
+size_t text_end(const Line& l) noexcept {
+    size_t i = l.size();
+    while (i > 0) {
+        const Cell& c = l.cell(i - 1);
+        if (c.wide() == Wide::SpacerTail) {
+            if (i >= 2 && detail::is_image_cell(l.cell(i - 2))) {
+                i -= 2;
+                continue;
+            }
+            break;
+        }
+        if (!trailing_blank(c)) break;
+        --i;
+    }
+    return i;
+}
+
 // Emit cells [a, b) of a cell array, grouped into runs of equal style.
-template <class CellAt, class StyleAt, class TailAt>
-void emit_cells(Sink& sink, size_t a, size_t b, CellAt&& cell_at, StyleAt&& style_at, TailAt&& tail_at) {
+// Image cells are skipped.
+template <class CellAt, class StyleAt, class TailAt, class UriAt>
+void emit_cells(Sink& sink, size_t a, size_t b, CellAt&& cell_at, StyleAt&& style_at, TailAt&& tail_at,
+                UriAt&& uri_at) {
     std::string run;
     const Style* cur = nullptr;
+    size_t cur_i = 0;
     for (size_t i = a; i < b; ++i) {
         const Cell& c = cell_at(i);
-        if (c.is_spacer()) continue;
+        if (c.is_spacer() || detail::is_image_cell(c)) continue;
         const Style& s = style_at(i);
         if (cur && !(s == *cur)) {
-            sink.run(run, *cur);
+            sink.run(run, *cur, uri_at(cur_i));
             run.clear();
         }
+        if (!cur || !(s == *cur)) cur_i = i;
         cur = &s;
         if (c.is_empty()) {
             run.push_back(' ');
@@ -51,10 +81,10 @@ void emit_cells(Sink& sink, size_t a, size_t b, CellAt&& cell_at, StyleAt&& styl
         if (c.has_cluster())
             for (char32_t t : tail_at(i)) append_utf8(run, t);
     }
-    if (cur && !run.empty()) sink.run(run, *cur);
+    if (cur && !run.empty()) sink.run(run, *cur, uri_at(cur_i));
 }
 
-void emit_stream(const Terminal& t, RowRange r, bool trim, Sink& sink) {
+void emit_stream(const RowSource& t, RowRange r, bool trim, Sink& sink) {
     BufferLines bl(t);
     Line l;
     if (r.start.row < t.first_row()) r.start = RowPos{t.first_row(), 0};
@@ -66,18 +96,19 @@ void emit_stream(const Terminal& t, RowRange r, bool trim, Sink& sink) {
         const bool last = r.end.row < l.end_row();
         size_t b = last ? l.offset_of(r.end) : l.size();
         l.widen(a, b);
-        if (trim) b = std::min(b, std::max(a, l.content_end()));
+        if (trim) b = std::min(b, std::max(a, text_end(l)));
         emit_cells(
             sink, a, b, [&](size_t i) -> const Cell& { return l.cell(i); },
-            [&](size_t i) -> const Style& { return l.style(i); }, [&](size_t i) { return l.tail(i); });
+            [&](size_t i) -> const Style& { return l.style(i); }, [&](size_t i) { return l.tail(i); },
+            [&](size_t i) { return l.link_uri(l.style(i).link); });
         if (last) return;
-        const int64_t next = l.number + 1;
+        const int64_t next = bl.next_line(l);
         if (!bl.line(next, l)) return;
         first = false;
     }
 }
 
-void emit_block(const Terminal& t, RowRange r, bool trim, Sink& sink) {
+void emit_block(const RowSource& t, RowRange r, bool trim, Sink& sink) {
     const int64_t r0 = std::max(r.start.row, t.first_row());
     const int64_t r1 = std::min(r.end.row, t.end_row() - 1);
     for (int64_t row = r0; row <= r1; ++row) {
@@ -91,15 +122,22 @@ void emit_block(const Terminal& t, RowRange r, bool trim, Sink& sink) {
         if (trim) {
             while (c1 > c0) {
                 const Cell& c = v.cells[c1 - 1];
-                if (c.wide() == Wide::SpacerTail || c.wide() == Wide::Lead) break;
-                if (!(c.is_empty() || (c.cp() == U' ' && !c.has_cluster()))) break;
+                if (c.wide() == Wide::SpacerTail && c1 - 1 > c0 && detail::is_image_cell(v.cells[c1 - 2])) {
+                    c1 -= 2;
+                    continue;
+                }
+                if (c.wide() == Wide::SpacerTail || c.wide() == Wide::Lead) {
+                    if (!detail::is_image_cell(c)) break;
+                }
+                if (!trailing_blank(c)) break;
                 --c1;
             }
         }
         emit_cells(
             sink, size_t(c0), size_t(c1), [&](size_t i) -> const Cell& { return v.cells[i]; },
             [&](size_t i) -> const Style& { return v.style(int(i)); },
-            [&](size_t i) { return v.clusters ? v.clusters->find(int(i)) : std::u32string_view(); });
+            [&](size_t i) { return v.clusters ? v.clusters->find(int(i)) : std::u32string_view(); },
+            [&](size_t i) { return t.hyperlink_uri(row, v.style(int(i)).link); });
     }
 }
 
@@ -128,12 +166,11 @@ void escape_html(std::string& out, std::string_view s) {
 }
 
 struct HtmlSink final : Sink {
-    const Terminal& t;
     const Palette& pal;
     std::string out;
-    HtmlSink(const Terminal& term, const Palette& p) : t(term), pal(p) {}
+    explicit HtmlSink(const Palette& p) : pal(p) {}
 
-    void run(std::string_view utf8, const Style& s) override {
+    void run(std::string_view utf8, const Style& s, const std::string* link) override {
         std::string css;
         Rgb fg = pal.resolve_fg(s.fg);
         Rgb bg = pal.resolve_bg(s.bg);
@@ -175,10 +212,9 @@ struct HtmlSink final : Sink {
                 css += ';';
             }
         }
-        const Hyperlink* link = s.link ? t.hyperlink(s.link) : nullptr;
         if (link) {
             out += "<a href=\"";
-            escape_html(out, link->uri);
+            escape_html(out, *link);
             out += "\">";
         }
         if (!css.empty()) out += "<span style=\"" + css + "\">";
@@ -200,7 +236,7 @@ std::string Selection::text(const TextOptions& o) const {
 }
 
 std::string Selection::html(const Palette& palette) const {
-    HtmlSink sink(t_, palette);
+    HtmlSink sink(palette);
     if (!active_) return {};
     if (mode_ == SelectionMode::Block) emit_block(t_, range_, true, sink);
     else emit_stream(t_, range_, true, sink);

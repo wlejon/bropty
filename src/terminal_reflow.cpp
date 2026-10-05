@@ -70,8 +70,9 @@ void Terminal::resize(int cols, int rows) {
     reset_margins();
     primary_.grid.mark_all_dirty();
     alt_.grid.mark_all_dirty();
-    primary_.grid.set_generation(gen_);  // the reflowed grid is new storage
-    alt_.grid.set_generation(gen_);
+    primary_.grid.rebase(reserve_stamps());  // rebuilt storage: every row gets a fresh stamp
+    alt_.grid.rebase(reserve_stamps());
+    ++numbering_;
     graphics_resize_end(old_screen_top);
     maybe_collect_garbage();
     for (TerminalObserver* o : observers_) o->after_resize();

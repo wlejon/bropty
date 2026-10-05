@@ -10,7 +10,12 @@ namespace bropty {
 
 using detail::BufferLines;
 
-TerminalView::TerminalView(Terminal& t) : t_(t), selection_(t), search_(t) { t_.add_observer(this); }
+TerminalView::TerminalView(Terminal& t) : TerminalView(static_cast<RowSource&>(t)) {}
+
+TerminalView::TerminalView(RowSource& source)
+    : t_(source), term_(const_cast<Terminal*>(source.terminal())), selection_(source), search_(source) {
+    t_.add_observer(this);
+}
 
 TerminalView::~TerminalView() { t_.remove_observer(this); }
 
@@ -48,8 +53,8 @@ bool TerminalView::scroll_to_prompt(bool backward) {
     const int64_t top = top_row();
     const int64_t n = bl.line_number_at_row(top);
     if (backward) {
-        int64_t m = bl.line_first_row(n) < top ? n : n - 1;
-        for (; m >= bl.first_line(); --m) {
+        int64_t m = bl.line_first_row(n) < top ? n : bl.prev_line(n);
+        for (; m >= bl.first_line(); m = bl.prev_line(m)) {
             if (bl.line_flags(m) & Row_Prompt) {
                 scroll_to_row(bl.line_first_row(m));
                 return true;
@@ -58,7 +63,7 @@ bool TerminalView::scroll_to_prompt(bool backward) {
         return false;
     }
     const int64_t end = bl.end_line();
-    for (int64_t m = n + 1; m < end; ++m) {
+    for (int64_t m = bl.next_line(n); m < end; m = bl.next_line(m)) {
         if (bl.line_flags(m) & Row_Prompt) {
             scroll_to_row(bl.line_first_row(m));
             return true;
@@ -102,7 +107,7 @@ void TerminalView::sync() {
 void TerminalView::before_resize() {
     selection_.before_resize();
     search_.before_resize();
-    if (!follow_ && !t_.alt_screen_active()) {
+    if (!follow_ && !t_.alt_screen_active() && term_) {
         BufferLines bl(t_);
         detail::LinePos lp = bl.to_line_pos(RowPos{top_row(), 0});
         carried_top_line_ = lp.line;
@@ -123,6 +128,7 @@ void TerminalView::after_resize() {
     hover_pos_.reset();
     hover_.reset();
     history_cache_.clear();
+    screen_cache_.clear();
     seen_change_ = ~0ull;
     ++version_;
 }
@@ -133,6 +139,7 @@ void TerminalView::screen_switched() {
     hover_pos_.reset();
     hover_.reset();
     history_cache_.clear();
+    screen_cache_.clear();
     ++version_;
 }
 

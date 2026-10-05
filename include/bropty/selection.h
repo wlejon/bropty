@@ -28,10 +28,17 @@
 // of each line are dropped, a wide character split by an edge is taken
 // whole, multi-code-point clusters come out whole, and a block selection
 // takes the same columns of each row. html() gives the same text as styled
-// HTML (inline CSS against a Palette; OSC 8 links become <a href>).
+// HTML (inline CSS against a Palette; OSC 8 links become <a href>). Image
+// cells (U+10EEEE: kitty Unicode placeholders, the cells sixel and iTerm2
+// images are drawn in) are part of a picture, not of the text: they are
+// left out of both, like the blanks they would otherwise trail.
+//
+// The buffer is any RowSource (row_source.h): a live Terminal, or a model of
+// one such as a multiplexer client's mirror of a remote screen.
 
 #include "bropty/color.h"
 #include "bropty/position.h"
+#include "bropty/row_source.h"
 #include "bropty/style.h"
 
 #include <cstdint>
@@ -40,8 +47,6 @@
 #include <vector>
 
 namespace bropty {
-
-class Terminal;
 
 enum class SelectionMode : uint8_t { Character, Word, Line, Block, Zone };
 
@@ -52,7 +57,10 @@ struct TextOptions {
 
 class Selection {
 public:
-    explicit Selection(const Terminal& t);
+    // Over a Terminal, or any RowSource (row_source.h). Over a source that
+    // is not a Terminal, a resize clears the selection: the source's rows
+    // were renumbered by a reflow it cannot carry positions through.
+    explicit Selection(const RowSource& source);
 
     // ---- gestures. `cell` is a cell position; `right_half` says which half
     // of it the pointer is over (Character mode).
@@ -105,7 +113,7 @@ private:
     [[nodiscard]] RowPos boundary(RowPos cell, bool right_half) const noexcept;
     bool zone_range(RowPos cell, Zone want, RowRange& out) const;
 
-    const Terminal& t_;
+    const RowSource& t_;
     bool active_{false};
     SelectionMode mode_{SelectionMode::Character};
     RowPos anchor_lo_;  // the unit the gesture started on (word, line, cell)

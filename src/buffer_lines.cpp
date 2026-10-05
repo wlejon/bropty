@@ -1,4 +1,9 @@
+// BufferLines: Line / LineText helpers, the dispatch between the Terminal
+// path (buffer_lines_term.cpp) and the generic one, and the generic one:
+// logical lines assembled from any RowSource's rows by their wrap flags.
 #include "buffer_lines.h"
+
+#include "bropty/terminal.h"
 
 #include <algorithm>
 
@@ -12,6 +17,12 @@ std::u32string_view Line::tail(size_t i) const {
     auto it = std::lower_bound(cl.begin(), cl.end(), uint32_t(i),
                                [](const auto& e, uint32_t k) { return e.first < k; });
     return (it != cl.end() && it->first == i) ? std::u32string_view(it->second) : std::u32string_view();
+}
+
+const std::string* Line::link_uri(uint32_t id) const noexcept {
+    if (id == 0) return nullptr;
+    if (local_links) return id <= uris.size() ? &uris[id - 1] : nullptr;
+    return src ? src->hyperlink_uri(first_row, id) : nullptr;
 }
 
 size_t Line::offset_of(RowPos p) const noexcept {
@@ -107,201 +118,183 @@ void LineText::cells_of(const Line& line, size_t b0, size_t b1, size_t& c0, size
 }
 
 // ---------------------------------------------------------------------------
-// BufferLines
-
-bool BufferLines::joint() const noexcept {
-    return !t_.alt_screen_active() && t_.scrollback().last_continued();
-}
-
-int64_t BufferLines::screen_base_line() const noexcept {
-    const Scrollback& sb = t_.scrollback();
-    return int64_t(sb.dropped_lines() + sb.lines()) - (joint() ? 1 : 0);
-}
+// BufferLines: dispatch
 
 int64_t BufferLines::first_line() const noexcept {
-    return t_.alt_screen_active() ? screen_base_line() : int64_t(t_.scrollback().dropped_lines());
+    if (!t_) return s_.first_row();
+    return t_->alt_screen_active() ? screen_base_line() : int64_t(t_->scrollback().dropped_lines());
 }
 
-int64_t BufferLines::screen_first_line() const noexcept { return screen_base_line(); }
+int64_t BufferLines::end_line() const { return t_ ? term_end_line() : s_.end_row(); }
 
-int64_t BufferLines::end_line() const {
-    int64_t n = 1;
-    for (int y = 1; y < t_.rows(); ++y)
-        if (!t_.row(y - 1).wrapped()) ++n;
-    return screen_base_line() + n;
-}
-
-int BufferLines::screen_line_start(int y) const noexcept {
-    while (y > 0 && t_.row(y - 1).wrapped()) --y;
-    return y;
+int64_t BufferLines::screen_first_line() const {
+    return t_ ? screen_base_line() : rows_line_start(s_.screen_top_row());
 }
 
 int64_t BufferLines::line_number_at_row(int64_t row) const {
-    const int64_t top = t_.screen_top_row();
-    if (row < top) {
-        if (t_.alt_screen_active() || row < t_.first_row()) return first_line() - 1;
-        const Scrollback& sb = t_.scrollback();
-        return int64_t(sb.dropped_lines() + sb.line_of_row(size_t(row - t_.first_row())));
-    }
-    int y = int(std::min<int64_t>(row - top, t_.rows() - 1));
-    int64_t n = 0;
-    for (int k = 1; k <= y; ++k)
-        if (!t_.row(k - 1).wrapped()) ++n;
-    return screen_base_line() + n;
-}
-
-int64_t BufferLines::line_first_row(int64_t number) const {
-    const Scrollback& sb = t_.scrollback();
-    if (!t_.alt_screen_active()) {
-        const int64_t k = number - int64_t(sb.dropped_lines());
-        if (k < 0) return t_.first_row();
-        if (k < int64_t(sb.lines())) return int64_t(sb.dropped_rows() + sb.line_first_row(size_t(k)));
-    }
-    const int y = screen_row_of_line(number - screen_base_line());
-    return y < 0 ? (number < screen_base_line() ? t_.first_row() : t_.end_row()) : t_.screen_top_row() + y;
-}
-
-int BufferLines::screen_row_of_line(int64_t idx) const noexcept {
-    if (idx < 0) return -1;
-    int64_t cur = 0;
-    for (int y = 0; y < t_.rows(); ++y) {
-        if (y > 0 && !t_.row(y - 1).wrapped()) ++cur;
-        if (cur == idx) return y;
-    }
-    return -1;
+    if (t_) return term_line_number_at_row(row);
+    if (row < s_.first_row()) return first_line() - 1;
+    return rows_line_start(std::min(row, s_.end_row() - 1));
 }
 
 uint32_t BufferLines::line_flags(int64_t number) const {
-    const Scrollback& sb = t_.scrollback();
-    if (!t_.alt_screen_active()) {
-        const int64_t k = number - int64_t(sb.dropped_lines());
-        if (k < 0) return 0;
-        if (k < int64_t(sb.lines()) && !(joint() && k + 1 == int64_t(sb.lines()))) return sb.line_flags(size_t(k));
-    }
-    const int64_t row = line_first_row(number);
+    if (t_) return term_line_flags(number);
+    if (number < s_.first_row() || number >= s_.end_row()) return 0;
     uint32_t flags = 0;
-    if (row < t_.screen_top_row()) {
-        flags = sb.line_flags(sb.lines() - 1);
-        for (int y = 0; y < t_.rows(); ++y) {
-            flags |= t_.row(y).flags & Row_SemanticMask;
-            if (!t_.row(y).wrapped()) break;
-        }
-        return flags;
-    }
-    for (int y = int(row - t_.screen_top_row()); y < t_.rows(); ++y) {
-        flags |= t_.row(y).flags & Row_SemanticMask;
-        if (!t_.row(y).wrapped()) break;
+    for (int64_t r = rows_line_start(number); r < s_.end_row(); ++r) {
+        const RowView v = s_.row_at(r);
+        flags |= v.flags & Row_SemanticMask;
+        if (!v.cells || !v.wrapped()) break;
     }
     return flags;
 }
 
-void BufferLines::history_line(size_t k, Line& out) const {
-    const Scrollback& sb = t_.scrollback();
-    sb.decode_line(k, out.cells, out.palette);
-    out.styles = out.palette.data();
-    out.number = int64_t(sb.dropped_lines() + k);
-    out.first_row = int64_t(sb.dropped_rows() + sb.line_first_row(k));
-    out.in_history = !sb.line_continued(k);
-    std::vector<WrapSpan> spans;
-    wrap_cells(out.cells.cells.data(), out.cells.cells.size(), sb.cols(), spans);
-    const size_t nrows = std::max<size_t>(1, sb.line_rows(k));
-    out.row_start.clear();
-    for (size_t r = 0; r < nrows; ++r) out.row_start.push_back(r < spans.size() ? spans[r].begin : uint32_t(out.size()));
-    out.row_start.push_back(uint32_t(out.size()));
+int64_t BufferLines::line_first_row(int64_t number) const {
+    if (t_) return term_line_first_row(number);
+    if (number < s_.first_row()) return s_.first_row();
+    if (number >= s_.end_row()) return s_.end_row();
+    return rows_line_start(number);
 }
 
-void BufferLines::append_screen_rows(int y0, Line& out, bool remap) const {
-    if (!out.row_start.empty()) out.row_start.pop_back();  // the end sentinel
-    std::vector<std::pair<uint32_t, uint32_t>> map;        // terminal style id -> palette index
-    for (int y = y0; y < t_.rows(); ++y) {
-        const RowView v = t_.row(y);
-        const size_t first = out.size();
-        out.row_start.push_back(uint32_t(first));
-        out.cells.append_row(v.cells, v.cols, v.clusters);
-        out.cells.flags |= v.flags & Row_SemanticMask;
-        if (remap) {
-            for (size_t i = first; i < out.size(); ++i) {
-                Cell& c = out.cells.cells[i];
-                auto it = std::find_if(map.begin(), map.end(), [&](const auto& e) { return e.first == c.style; });
-                if (it == map.end()) {
-                    const Style& s = t_.style(c.style);
-                    uint32_t idx = 0;
-                    while (idx < out.palette.size() && !(out.palette[idx] == s)) ++idx;
-                    if (idx == out.palette.size()) out.palette.push_back(s);
-                    it = map.insert(map.end(), {c.style, idx});
-                }
-                c.style = it->second;
-            }
-        }
-        if (!v.wrapped()) break;
-    }
-    out.row_start.push_back(uint32_t(out.size()));
-    if (remap) out.styles = out.palette.data();
+int64_t BufferLines::next_line(int64_t number) const {
+    if (t_) return number + 1;
+    if (number < s_.first_row()) return s_.first_row();
+    if (number >= s_.end_row()) return number + 1;
+    return rows_line_end(rows_line_start(number));
 }
 
-void BufferLines::screen_line(int y0, Line& out) const {
-    if (y0 == 0 && joint()) {
-        history_line(t_.scrollback().lines() - 1, out);
-        out.in_history = false;
-        out.cells.continued = false;
-        append_screen_rows(0, out, true);
-        return;
-    }
-    out.cells.clear();
-    out.palette.clear();
-    out.row_start.clear();
-    out.number = line_number_at_row(t_.screen_top_row() + y0);
-    out.first_row = t_.screen_top_row() + y0;
-    out.styles = t_.styles().data();
-    out.in_history = false;
-    append_screen_rows(y0, out, false);
+int64_t BufferLines::prev_line(int64_t number) const {
+    if (t_) return number - 1;
+    const int64_t first = s_.first_row();
+    if (number <= first) return first - 1;
+    if (number >= s_.end_row()) return rows_line_start(s_.end_row() - 1);
+    const int64_t start = rows_line_start(number);
+    return start <= first ? first - 1 : rows_line_start(start - 1);
 }
 
 bool BufferLines::line_at_row(int64_t row, Line& out) const {
-    if (row < t_.first_row() || row >= t_.end_row()) return false;
-    const int64_t top = t_.screen_top_row();
-    if (row < top) {
-        const Scrollback& sb = t_.scrollback();
-        size_t k = sb.line_of_row(size_t(row - t_.first_row()));
-        if (k + 1 == sb.lines() && joint()) screen_line(0, out);
-        else history_line(k, out);
-        return true;
-    }
-    screen_line(screen_line_start(int(row - top)), out);
-    return true;
+    return t_ ? term_line_at_row(row, out) : rows_line_at_row(row, out);
 }
 
 bool BufferLines::line(int64_t number, Line& out) const {
-    if (number < first_line()) return false;
-    const Scrollback& sb = t_.scrollback();
-    if (!t_.alt_screen_active()) {
-        const int64_t k = number - int64_t(sb.dropped_lines());
-        if (k < int64_t(sb.lines())) {
-            if (k + 1 == int64_t(sb.lines()) && joint()) screen_line(0, out);
-            else history_line(size_t(k), out);
-            return true;
-        }
-    }
-    const int y = screen_row_of_line(number - screen_base_line());
-    if (y < 0) return false;
-    screen_line(y, out);
-    return true;
+    if (t_) return term_line(number, out);
+    return rows_line_at_row(number, out);
 }
 
 LinePos BufferLines::to_line_pos(RowPos p) const {
-    if (p.row < t_.first_row()) return LinePos{first_line() - 1, 0};
-    if (p.row >= t_.end_row()) return LinePos{end_line(), 0};
+    if (p.row < s_.first_row()) return LinePos{first_line() - 1, 0};
+    if (p.row >= s_.end_row()) return LinePos{end_line(), 0};
     Line l;
     line_at_row(p.row, l);
     return LinePos{l.number, l.offset_of(p)};
 }
 
 RowPos BufferLines::from_line_pos(const LinePos& lp) const {
-    if (lp.line < first_line()) return RowPos{t_.first_row() - 1, 0};
+    if (lp.line < first_line()) return RowPos{s_.first_row() - 1, 0};
     Line l;
-    if (!line(lp.line, l)) return RowPos{t_.end_row(), 0};
+    if (!line(lp.line, l)) return RowPos{s_.end_row(), 0};
     return l.pos_of(std::min(lp.offset, l.size()));
 }
+
+// ---------------------------------------------------------------------------
+// BufferLines over any RowSource
+
+int64_t BufferLines::rows_line_start(int64_t row) const {
+    const int64_t first = s_.first_row();
+    while (row > first && s_.row_at(row - 1).wrapped()) --row;
+    return row;
+}
+
+int64_t BufferLines::rows_line_end(int64_t start) const {
+    const int64_t end = s_.end_row();
+    int64_t r = start;
+    while (r < end) {
+        const RowView v = s_.row_at(r++);
+        if (!v.cells || !v.wrapped()) break;
+    }
+    return r;
+}
+
+namespace {
+
+// Append a row of a source, its styles interned into the line's palette
+// and its hyperlinks into the line's own URI table (rows of one line may
+// come from different id spaces).
+void append_source_row(Line& out, const RowView& v, int64_t row, const RowSource& s) {
+    const size_t first = out.size();
+    out.row_start.push_back(uint32_t(first));
+    if (!v.cells) {
+        out.missing = true;
+        return;
+    }
+    out.cells.append_row(v.cells, v.cols, v.clusters);
+    out.cells.flags |= v.flags & Row_SemanticMask;
+    std::vector<std::pair<uint32_t, uint32_t>> map;  // row style id -> palette index
+    for (size_t i = first; i < out.size(); ++i) {
+        Cell& c = out.cells.cells[i];
+        auto it = std::find_if(map.begin(), map.end(), [&](const auto& e) { return e.first == c.style; });
+        if (it == map.end()) {
+            Style st = v.styles[c.style];
+            if (st.link) {
+                const std::string* uri = s.hyperlink_uri(row, st.link);
+                uint32_t k = 0;
+                if (uri) {
+                    while (k < out.uris.size() && out.uris[k] != *uri) ++k;
+                    if (k == out.uris.size()) out.uris.push_back(*uri);
+                }
+                st.link = uri ? k + 1 : 0;
+            }
+            uint32_t idx = 0;
+            while (idx < out.palette.size() && !(out.palette[idx] == st)) ++idx;
+            if (idx == out.palette.size()) out.palette.push_back(st);
+            it = map.insert(map.end(), {c.style, idx});
+        }
+        c.style = it->second;
+    }
+}
+
+} // namespace
+
+bool BufferLines::rows_line_at_row(int64_t row, Line& out) const {
+    if (row < s_.first_row() || row >= s_.end_row()) return false;
+    const int64_t start = rows_line_start(row);
+    out.cells.clear();
+    out.palette.clear();
+    out.row_start.clear();
+    out.uris.clear();
+    out.src = &s_;
+    out.local_links = true;
+    out.missing = false;
+    out.number = start;
+    out.first_row = start;
+    bool wrapped_last = false;
+    for (int64_t r = start; r < s_.end_row(); ++r) {
+        const RowView v = s_.row_at(r);
+        append_source_row(out, v, r, s_);
+        wrapped_last = v.cells && v.wrapped();
+        if (!wrapped_last) break;
+    }
+    const int64_t end = start + int64_t(out.row_start.size());  // the sentinel is not in yet
+    out.in_history = end <= s_.screen_top_row() && !wrapped_last;
+    if (out.in_history) {
+        // As history keeps a line (Scrollback::push_row): without its
+        // trailing blanks, so a word or zone at its end reads the same.
+        auto& cells = out.cells.cells;
+        size_t n = cells.size();
+        while (n > 0 && cells[n - 1].is_empty() && cells[n - 1].wide() == Wide::Narrow &&
+               out.palette[cells[n - 1].style] == Style{})
+            --n;
+        cells.resize(n);
+        auto& cl = out.cells.clusters;
+        while (!cl.empty() && cl.back().first >= n) cl.pop_back();
+        for (uint32_t& s : out.row_start) s = std::min(s, uint32_t(n));
+    }
+    out.row_start.push_back(uint32_t(out.size()));
+    out.styles = out.palette.data();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 
 uint64_t row_hash(const RowView& v) noexcept {
     uint64_t h = 1469598103934665603ull;

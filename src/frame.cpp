@@ -5,6 +5,7 @@
 #include "bropty/view.h"
 
 #include <algorithm>
+#include <climits>
 
 namespace bropty {
 
@@ -59,10 +60,15 @@ bool Frame::row_differs(const Frame& drawn, int y) const noexcept {
 // ---------------------------------------------------------------------------
 // TerminalView frame building
 
-std::shared_ptr<FrameRow> TerminalView::snapshot_row(const RowView& v) {
+std::shared_ptr<FrameRow> TerminalView::snapshot_row(const RowView& v, int64_t row) {
     auto r = std::make_shared<FrameRow>();
     r->serial = ++serial_;
-    if (!v.cells) return r;
+    if (!v.cells) {  // a row the source does not hold: blank
+        r->cols = t_.cols();
+        r->cells.assign(size_t(r->cols), Cell{});
+        r->styles.assign(1, Style{});
+        return r;
+    }
     r->cols = v.cols;
     r->flags = v.flags;
     r->cells.assign(v.cells, v.cells + v.cols);
@@ -93,26 +99,39 @@ std::shared_ptr<FrameRow> TerminalView::snapshot_row(const RowView& v) {
     if (v.clusters) r->clusters = *v.clusters;
     for (const Style& s : r->styles) {
         if (!s.link || r->link_uri(s.link)) continue;
-        if (const Hyperlink* h = t_.hyperlink(s.link)) r->links.emplace_back(s.link, h->uri);
+        if (const std::string* uri = t_.hyperlink_uri(row, s.link)) r->links.emplace_back(s.link, *uri);
     }
     return r;
 }
 
 std::shared_ptr<const FrameRow> TerminalView::screen_row(int y) {
-    ScreenEntry& e = screen_cache_[t_.row_storage(y)];
-    const uint64_t stamp = t_.row_stamp(y);
-    if (!e.row || e.stamp != stamp) {
-        e.row = snapshot_row(t_.row(y));
-        e.stamp = stamp;
+    const int64_t abs = t_.screen_top_row() + y;
+    const uint64_t serial = t_.row_serial(abs);
+    if (serial != 0) {
+        auto it = std::lower_bound(screen_cache_.begin(), screen_cache_.end(), serial,
+                                   [](const ScreenEntry& e, uint64_t s) { return e.serial < s; });
+        if (it != screen_cache_.end() && it->serial == serial) {
+            screen_next_.push_back(*it);
+            return it->row;
+        }
     }
-    return e.row;
+    std::shared_ptr<const FrameRow> r = snapshot_row(t_.row_at(abs), abs);
+    if (serial != 0) screen_next_.push_back(ScreenEntry{serial, r});
+    return r;
 }
 
 std::shared_ptr<const FrameRow> TerminalView::history_row(int64_t row) {
     auto it = history_cache_.find(row);
     if (it != history_cache_.end()) return it->second;
     const RowView v = t_.row_at(row);
-    auto r = snapshot_row(v);
+    auto r = snapshot_row(v, row);
+    // A row the source does not hold shows blank until it has it (build()
+    // asks for the missing span).
+    if (!v.cells) {
+        miss_lo_ = std::min(miss_lo_, row);
+        miss_hi_ = std::max(miss_hi_, row + 1);
+        return r;
+    }
     // History rows are immutable except one: the last row of history, when
     // its line continues onto the screen, stops being soft-wrapped if the row
     // that scrolls up after it turns out not to continue it. Keep that one
@@ -166,15 +185,19 @@ std::shared_ptr<Frame> TerminalView::build() {
     f->top_row = top_row();
     f->first_row = t_.first_row();
     f->screen_top_row = t_.screen_top_row();
-    if (t_.grid_id() != screen_grid_ || screen_cache_.size() != size_t(f->rows)) {
-        screen_cache_.assign(size_t(f->rows), ScreenEntry{});
-        screen_grid_ = t_.grid_id();
-    }
     f->lines.resize(size_t(f->rows));
+    screen_next_.clear();
+    miss_lo_ = INT64_MAX;
+    miss_hi_ = INT64_MIN;
     for (int y = 0; y < f->rows; ++y) {
         const int64_t abs = f->top_row + y;
         f->lines[size_t(y)] = abs >= f->screen_top_row ? screen_row(int(abs - f->screen_top_row)) : history_row(abs);
     }
+    if (miss_lo_ < miss_hi_) t_.request_rows(miss_lo_, miss_hi_);
+    // Keep the screen rows of this frame, by serial.
+    std::sort(screen_next_.begin(), screen_next_.end(),
+              [](const ScreenEntry& a, const ScreenEntry& b) { return a.serial < b.serial; });
+    screen_cache_.swap(screen_next_);
     // History rows are kept only while in view.
     for (auto it = history_cache_.begin(); it != history_cache_.end();) {
         if (it->first < f->top_row || it->first >= f->top_row + f->rows) it = history_cache_.erase(it);
@@ -191,7 +214,7 @@ std::shared_ptr<Frame> TerminalView::build() {
         palette_ = std::make_shared<const Palette>(p);
     f->palette = palette_;
     build_highlights(*f);
-    build_images(*f);
+    if (term_) build_images(*f);
     f->search_active = search_.active();
     f->search_complete = search_.complete();
     f->match_count = search_.size();

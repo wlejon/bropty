@@ -54,6 +54,14 @@ public:
     // Observe (and, without a PTY, capture) every byte sent to the
     // application, at the moment the Session accepts it.
     void set_output_callback(OutputCallback cb) { output_cb_ = std::move(cb); }
+    // Output tap: observe the application's output -- every chunk update()
+    // reads from the PTY, and every feed() -- exactly as it is handed to the
+    // terminal, just before. Feeding the same chunks, in order, to a fresh
+    // Terminal with the same options (and the same resizes between them)
+    // reproduces this one: recorders, mirrors and replay oracles hang here
+    // instead of reading the PTY themselves.
+    using FeedTap = std::function<void(std::string_view)>;
+    void set_feed_tap(FeedTap tap) { feed_tap_ = std::move(tap); }
 
     // Feed pending PTY output into the terminal, bounded so that a fast
     // producer cannot stall the host's frame: update() stops after
@@ -72,7 +80,10 @@ public:
     size_t update(const UpdateBudget& budget);
     [[nodiscard]] bool has_pending_output() const { return pty_ && pty_->available() > 0; }
     // Feed bytes directly (no PTY).
-    void feed(std::string_view bytes) { term_.feed(bytes); }
+    void feed(std::string_view bytes) {
+        if (feed_tap_) feed_tap_(bytes);
+        term_.feed(bytes);
+    }
 
     // ---- input (input.h), encoded for the terminal's current modes and
     // written to the application. Each returns whether it was accepted.
@@ -110,6 +121,9 @@ public:
     void cwd_changed(std::string_view uri) override;
     void clipboard_write(std::string_view sel, std::string_view data) override;
     std::optional<std::string> clipboard_read(std::string_view sel) override;
+    // Forwarded to the delegate; answer through terminal().answer_clipboard()
+    // (the reply then goes to the PTY like any other, behind a pending paste).
+    bool clipboard_read_async(uint64_t request, std::string_view sel) override;
     void notification(std::string_view title, std::string_view body) override;
     void progress(int state, int value) override;
     void semantic_mark(char kind, std::string_view params) override;
@@ -127,6 +141,7 @@ private:
     std::shared_ptr<IPtyProcess> pty_;
     TerminalHost* delegate_{nullptr};
     OutputCallback output_cb_;
+    FeedTap feed_tap_;
     std::unique_ptr<char[]> read_buf_;
     MouseReporter mouse_;
     std::string outbox_;      // accepted, not yet taken by the pty, in order

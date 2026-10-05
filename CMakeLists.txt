@@ -34,6 +34,7 @@ set(BROPTY_SOURCES
     src/terminal_osc.cpp
     src/terminal_reflow.cpp
     src/buffer_lines.cpp
+    src/buffer_lines_term.cpp
     src/selection.cpp
     src/selection_text.cpp
     src/search.cpp

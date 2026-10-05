@@ -38,11 +38,23 @@ namespace bropty {
 class TerminalView final : private TerminalObserver {
 public:
     explicit TerminalView(Terminal& t);
+    // A view over any RowSource (row_source.h), e.g. a multiplexer client's
+    // model of a remote screen: the same viewport, selection, search, links
+    // and frames. Differences from a Terminal-backed view: frames carry no
+    // images, rows the source does not hold show blank until it has them
+    // (they are requested), and a resize clears the selection, restarts the
+    // search and returns the viewport to the bottom (the source's reflow
+    // happened where positions cannot be carried through it).
+    explicit TerminalView(RowSource& source);
     ~TerminalView() override;
     TerminalView(const TerminalView&) = delete;
     TerminalView& operator=(const TerminalView&) = delete;
 
-    [[nodiscard]] Terminal& terminal() noexcept { return t_; }
+    [[nodiscard]] RowSource& source() noexcept { return t_; }
+    // The Terminal behind the view, or nullptr for another source.
+    [[nodiscard]] Terminal* terminal_or_null() noexcept { return term_; }
+    // Only for a view over a Terminal.
+    [[nodiscard]] Terminal& terminal() noexcept { return *term_; }
 
     // ---- viewport ----------------------------------------------------------
     // Absolute row shown at the top. At the bottom the view follows output;
@@ -92,12 +104,13 @@ private:
     std::shared_ptr<Frame> build();
     std::shared_ptr<const FrameRow> screen_row(int y);
     std::shared_ptr<const FrameRow> history_row(int64_t row);
-    std::shared_ptr<FrameRow> snapshot_row(const RowView& v);
+    std::shared_ptr<FrameRow> snapshot_row(const RowView& v, int64_t row);
     void build_highlights(Frame& f) const;
     void build_images(Frame& f) const;  // frame_images.cpp
     void build_damage(Frame& f) const;
 
-    Terminal& t_;
+    RowSource& t_;
+    Terminal* term_;  // t_ when it is a Terminal
     Selection selection_;
     Search search_;
     bool follow_{true};
@@ -109,13 +122,17 @@ private:
     uint64_t version_{0};       // viewport / hover changes
     uint64_t seen_change_{~0ull};
 
-    // Frame building.
+    // Frame building. Screen rows are cached by the source's row serial
+    // (a scrolled row keeps its serial, so a scroll costs only the new rows);
+    // sorted by serial, holding the rows of the last frame.
     struct ScreenEntry {
-        uint64_t stamp{0};
+        uint64_t serial{0};
         std::shared_ptr<const FrameRow> row;
     };
-    std::vector<ScreenEntry> screen_cache_;  // by storage row
-    uint64_t screen_grid_{0};
+    std::vector<ScreenEntry> screen_cache_;
+    std::vector<ScreenEntry> screen_next_;
+    int64_t miss_lo_{0};  // history rows a build found missing: [lo, hi)
+    int64_t miss_hi_{0};
     std::unordered_map<int64_t, std::shared_ptr<const FrameRow>> history_cache_;
     std::shared_ptr<const Palette> palette_;
     std::shared_ptr<const Frame> last_;

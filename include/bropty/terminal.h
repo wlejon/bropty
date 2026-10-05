@@ -17,8 +17,10 @@
 #include "bropty/color.h"
 #include "bropty/graphics.h"
 #include "bropty/grid.h"
+#include "bropty/modes.h"
 #include "bropty/parser.h"
 #include "bropty/position.h"
+#include "bropty/row_source.h"
 #include "bropty/scrollback.h"
 #include "bropty/style.h"
 #include "bropty/unicode.h"
@@ -63,6 +65,19 @@ public:
         (void)selection;
         return std::nullopt;
     }
+    // OSC 52 query, answered later (the clipboard is behind a permission
+    // prompt, another process, or a network round trip). Asked first; return
+    // true to take the query, then answer it with
+    // Terminal::answer_clipboard(request, data) -- or drop it with
+    // Terminal::cancel_clipboard(request) -- whenever the answer is known,
+    // from the terminal's thread. The reply is written then, terminated as
+    // the query was. Return false (the default) to have clipboard_read()
+    // answer at once instead. `selection` is the raw Pc field (empty: "s0").
+    virtual bool clipboard_read_async(uint64_t request, std::string_view selection) {
+        (void)request;
+        (void)selection;
+        return false;
+    }
     // OSC 9 / OSC 777 desktop notification.
     virtual void notification(std::string_view title, std::string_view body) {
         (void)title;
@@ -105,22 +120,6 @@ public:
     }
 };
 
-// Things that keep positions in the buffer (TerminalView: selection, search,
-// viewport) hear about the changes that renumber rows. Called on the
-// terminal's thread, from inside resize() (also when an application resizes
-// through DECCOLM, i.e. inside feed()).
-class TerminalObserver {
-public:
-    virtual ~TerminalObserver() = default;
-    // The terminal is about to resize; its state is still the old one, so
-    // positions can be converted to text offsets (see TerminalView).
-    virtual void before_resize() {}
-    // The resize (and the primary screen's reflow) is complete.
-    virtual void after_resize() {}
-    // The alternate screen was entered or left.
-    virtual void screen_switched() {}
-};
-
 struct TerminalOptions {
     int cols{80};
     int rows{24};
@@ -137,74 +136,16 @@ struct TerminalOptions {
     GraphicsOptions graphics;  // inline images (graphics.h)
 };
 
-enum class CursorShape : uint8_t { Block, Underline, Bar };
-enum class MouseTracking : uint8_t { None, X10, Normal, Button, Any };
-enum class MouseEncoding : uint8_t { Default, Utf8, Sgr, Urxvt, SgrPixels };
-
-struct Modes {
-    bool insert{false};            // IRM (4)
-    bool linefeed_newline{false};  // LNM (20)
-    bool app_cursor_keys{false};   // DECCKM (?1)
-    bool reverse_video{false};     // DECSCNM (?5)
-    bool origin{false};            // DECOM (?6)
-    bool autowrap{true};           // DECAWM (?7)
-    bool cursor_blink{false};      // ?12
-    bool cursor_visible{true};     // DECTCEM (?25)
-    bool reverse_wrap{false};      // ?45
-    bool app_keypad{false};        // DECNKM (?66) / DECKPAM
-    bool backarrow_sends_bs{false};  // DECBKM (?67)
-    bool left_right_margins{false};  // DECLRMM (?69)
-    MouseTracking mouse_tracking{MouseTracking::None};  // ?9 ?1000 ?1002 ?1003
-    MouseEncoding mouse_encoding{MouseEncoding::Default};  // ?1005 ?1006 ?1015 ?1016
-    bool focus_events{false};       // ?1004
-    bool alternate_scroll{false};   // ?1007
-    bool meta_sends_escape{true};   // ?1036
-    bool alt_sends_escape{true};    // ?1039
-    bool bracketed_paste{false};    // ?2004
-    bool synchronized_output{false};  // ?2026
-    bool grapheme_clustering{true};   // ?2027
-    bool color_scheme_updates{false};  // ?2031
-    bool in_band_resize{false};        // ?2048
-    bool allow_deccolm{false};         // ?40: let DECCOLM (?3) change the width
-    bool deccolm{false};               // ?3: 132 columns (honoured only under ?40)
-    bool deccolm_no_clear{false};      // ?95 DECNCSM: DECCOLM keeps the screen
-    // xterm's key-modifier resources, set by XTMODKEYS (CSI > Pp ; Pv m),
-    // disabled (-1) by CSI > Pp n, reported by XTQMODKEYS (CSI ? Pp m). The
-    // initial values are xterm's. Cursor / function / keypad / other keys shape
-    // the legacy encoder (see input.h); keyboard, modifier and special keys are
-    // kept and reported but select nothing bropty encodes differently.
-    int modify_keyboard{0};            // Pp 0
-    int modify_cursor_keys{2};         // Pp 1: -1 .. 3
-    int modify_function_keys{2};       // Pp 2: -1 .. 3
-    int modify_keypad_keys{0};         // Pp 3: -1 .. 3
-    int modify_other_keys{0};          // Pp 4: 0, 1, 2 (3 = 2)
-    int modify_modifier_keys{0};       // Pp 6
-    int modify_special_keys{0};        // Pp 7
-    int format_other_keys{0};          // XTFMTKEYS (CSI > 4 ; Pv f): 0 = CSI 27;m;c ~, 1 = CSI c;m u
-    // Sixel (xterm): ?80 DECSDM, sixel display mode (no scrolling: images at
-    // the top-left, the cursor stays); ?1070, a fresh palette per image
-    // (reset: registers persist between images); ?8452, the cursor ends to
-    // the right of an image instead of at its left edge (both on its last row).
-    bool sixel_display_mode{false};
-    bool sixel_private_colors{true};
-    bool sixel_cursor_right{false};
-};
-
-struct CursorState {
-    int row{0};
-    int col{0};
-    bool pending_wrap{false};
-    bool visible{true};
-    CursorShape shape{CursorShape::Block};
-    bool blink{true};
-};
-
 struct Hyperlink {
     std::string id;   // the OSC 8 id= parameter (may be empty)
     std::string uri;
 };
 
-class Terminal final : private ParserSink {
+// A Terminal is a RowSource (row_source.h): Selection, Search, link
+// detection and TerminalView read it through that interface. (ParserSink
+// stays the first base: the parser's calls into the terminal, the hot path,
+// then need no this-adjusting thunks.)
+class Terminal final : private ParserSink, public RowSource {
 public:
     Terminal();
     explicit Terminal(const TerminalOptions& options);
@@ -228,11 +169,11 @@ public:
     void reset();  // RIS
 
     // ---- reading -----------------------------------------------------------
-    [[nodiscard]] int cols() const noexcept { return cols_; }
-    [[nodiscard]] int rows() const noexcept { return rows_; }
-    [[nodiscard]] CursorState cursor() const noexcept;
-    [[nodiscard]] const Modes& modes() const noexcept { return modes_; }
-    [[nodiscard]] bool alt_screen_active() const noexcept { return active_ == &alt_; }
+    [[nodiscard]] int cols() const noexcept override { return cols_; }
+    [[nodiscard]] int rows() const noexcept override { return rows_; }
+    [[nodiscard]] CursorState cursor() const noexcept override;
+    [[nodiscard]] const Modes& modes() const noexcept override { return modes_; }
+    [[nodiscard]] bool alt_screen_active() const noexcept override { return active_ == &alt_; }
     [[nodiscard]] uint32_t kitty_keyboard_flags() const noexcept;
 
     // Screen row y of the active screen, 0 <= y < rows().
@@ -246,8 +187,25 @@ public:
 
     [[nodiscard]] const Style& style(uint32_t id) const noexcept { return styles_.get(id); }
     [[nodiscard]] const StyleTable& styles() const noexcept { return styles_; }
-    [[nodiscard]] const Palette& palette() const noexcept { return palette_; }
+    [[nodiscard]] const Palette& palette() const noexcept override { return palette_; }
     [[nodiscard]] const Hyperlink* hyperlink(uint32_t id) const noexcept;
+    // RowSource: the terminal's hyperlink ids are one space for every row.
+    [[nodiscard]] const std::string* hyperlink_uri(int64_t row, uint32_t id) const noexcept override {
+        (void)row;
+        const Hyperlink* h = hyperlink(id);
+        return h ? &h->uri : nullptr;
+    }
+
+    // ---- OSC 52 queries taken by TerminalHost::clipboard_read_async() --------
+    // Answer one with the clipboard's contents: the reply is written through
+    // the host, terminated as the query was. False when `request` is not
+    // pending (answered or cancelled already, or dropped: at most
+    // kMaxClipboardRequests wait, the oldest go first).
+    bool answer_clipboard(uint64_t request, std::string_view data);
+    // Drop one unanswered (the program gets no reply, as when refused).
+    bool cancel_clipboard(uint64_t request);
+    [[nodiscard]] size_t pending_clipboard_requests() const noexcept { return clip_pending_.size(); }
+    static constexpr size_t kMaxClipboardRequests = 16;
 
     [[nodiscard]] const std::string& title() const noexcept { return title_; }
     [[nodiscard]] const std::string& icon_name() const noexcept { return icon_name_; }
@@ -264,18 +222,37 @@ public:
     // ---- absolute rows (position.h) ------------------------------------------
     // The oldest row still held: history row 0, or (on the alternate screen,
     // which has no history) screen row 0.
-    [[nodiscard]] int64_t first_row() const noexcept {
-        return alt_screen_active() ? screen_top_row() : int64_t(scrollback_.dropped_rows());
+    [[nodiscard]] int64_t first_row() const noexcept override {
+        return alt_screen_active() ? screen_top_row() : history_first_row();
     }
     // Screen row 0 of the active screen.
-    [[nodiscard]] int64_t screen_top_row() const noexcept {
+    [[nodiscard]] int64_t screen_top_row() const noexcept override {
         return int64_t(scrollback_.dropped_rows() + scrollback_.rows());
     }
     // One past the last row.
     [[nodiscard]] int64_t end_row() const noexcept { return screen_top_row() + rows_; }
     // Row `abs` (first_row() <= abs < end_row()); an empty view otherwise.
     // History views share the scrollback's decode cache: read one at a time.
-    [[nodiscard]] RowView row_at(int64_t abs) const;
+    [[nodiscard]] RowView row_at(int64_t abs) const override;
+    // The primary screen's history as absolute rows, also while the
+    // alternate screen is active: history_row(i) is row history_first_row() + i.
+    // Rows evicted from the front of history (capacity, ED 3) never give
+    // their numbers to other text: history_first_row() only grows -- until
+    // row_numbering() changes.
+    [[nodiscard]] int64_t history_first_row() const noexcept { return int64_t(scrollback_.dropped_rows()); }
+    // Bumped whenever rows that already had numbers get new ones: a resize
+    // (the primary screen and its history reflow). While it stays the same,
+    // an absolute row keeps its number, and a history row its content (except
+    // the newest history row's wrap flag while its line continues on the
+    // screen: when the next row turns out not to continue it, it unwraps).
+    // A reader that caches rows by number drops its cache when this changes.
+    [[nodiscard]] uint64_t row_numbering() const noexcept { return numbering_; }
+    // RowSource: screen rows' stamps (below); 0 for history rows.
+    [[nodiscard]] uint64_t row_serial(int64_t abs) const noexcept override {
+        const int64_t y = abs - screen_top_row();
+        return y >= 0 && y < rows_ ? row_stamp(int(y)) : 0;
+    }
+    [[nodiscard]] const Terminal* terminal() const noexcept override { return this; }
     // The cursor as an absolute position.
     [[nodiscard]] RowPos cursor_pos() const noexcept {
         return RowPos{screen_top_row() + active_->cur.row, active_->cur.col};
@@ -286,24 +263,24 @@ public:
     // ---- change tracking for readers on the terminal's thread ----------------
     // Bumped by every feed(), resize() and reset(): nothing a reader sees
     // changed while it stays the same.
-    [[nodiscard]] uint64_t change_count() const noexcept { return change_count_; }
-    // Per screen row: a stamp that changes whenever the row's content does
-    // (it travels with the row when the screen scrolls), paired with
-    // grid_id(), which changes when the screen's storage is rebuilt (resize,
-    // and per screen: compare both). A reader that caches row content calls
-    // advance_generation() after reading, so later writes get a new stamp.
+    [[nodiscard]] uint64_t change_count() const noexcept override { return change_count_; }
+    // Per screen row: a content stamp. It changes whenever the row's content
+    // does, travels with the row when the screen scrolls, and is a serial:
+    // two rows with equal stamps hold equal content, across both screens,
+    // resizes and the terminal's whole life (never 0). That holds as long as
+    // a reader that compares stamps calls advance_generation() after reading
+    // them (and the row content it keeps), so later writes get stamps it has
+    // not seen. Several readers may share one terminal: each one advancing
+    // after its read keeps it true for all.
     [[nodiscard]] uint64_t row_stamp(int y) const noexcept { return active_->grid.stamp(y); }
-    // Which storage row (0 .. rows()-1) screen row y is; follows the row as it scrolls.
+    // Which storage row (0 .. rows()-1) screen row y is; follows the row as
+    // it scrolls. Storage is per screen and rebuilt by a resize (grid_id()).
     [[nodiscard]] uint32_t row_storage(int y) const noexcept { return active_->grid.storage(y); }
     [[nodiscard]] uint64_t grid_id() const noexcept { return active_->grid.id(); }
-    void advance_generation() noexcept {
-        ++gen_;
-        primary_.grid.set_generation(gen_);
-        alt_.grid.set_generation(gen_);
+    void advance_generation() noexcept override {
+        primary_.grid.set_generation(reserve_stamps());
+        alt_.grid.set_generation(reserve_stamps());
     }
-
-    void add_observer(TerminalObserver* o);
-    void remove_observer(TerminalObserver* o);
 
     // ---- inline images (graphics.h) -------------------------------------------
     // The images and kitty placements of the active screen / of either one.
@@ -542,8 +519,22 @@ private:
 
     Zone zone_{Zone::None};
     uint64_t change_count_{0};
-    uint64_t gen_{1};
-    std::vector<TerminalObserver*> observers_;
+    uint64_t next_stamp_{1};  // row stamps are drawn from here (Grid::set_generation)
+    uint64_t numbering_{0};
+    uint64_t reserve_stamps() noexcept {
+        const uint64_t base = next_stamp_;
+        next_stamp_ += uint64_t(rows_);
+        return base;
+    }
+
+    // OSC 52 queries waiting for answer_clipboard().
+    struct ClipQuery {
+        uint64_t id{0};
+        std::string selection;
+        bool bel{false};
+    };
+    std::vector<ClipQuery> clip_pending_;
+    uint64_t next_clip_{1};
 
     std::string title_;
     std::string icon_name_;

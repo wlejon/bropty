@@ -33,7 +33,7 @@ void walk_forward(const BufferLines& bl, Line line, size_t from, F&& f) {
     for (;;) {
         for (size_t i = from; i < line.size(); ++i)
             if (!f(line, i)) return;
-        const int64_t next = line.number + 1;
+        const int64_t next = bl.next_line(line);
         if (!bl.line(next, line)) return;
         from = 0;
     }
@@ -44,7 +44,7 @@ void walk_backward(const BufferLines& bl, Line line, size_t from, F&& f) {
     for (;;) {
         for (size_t i = from; i > 0; --i)
             if (!f(line, i - 1)) return;
-        const int64_t prev = line.number - 1;
+        const int64_t prev = bl.prev_line(line);
         if (prev < bl.first_line() || !bl.line(prev, line)) return;
         from = line.size();
     }
@@ -62,7 +62,7 @@ size_t cell_end(const Line& l, size_t i) noexcept {
 
 } // namespace
 
-Selection::Selection(const Terminal& t) : t_(t) {}
+Selection::Selection(const RowSource& source) : t_(source) {}
 
 RowPos Selection::boundary(RowPos cell, bool right_half) const noexcept {
     return RowPos{cell.row, std::clamp(cell.col + (right_half ? 1 : 0), 0, t_.cols())};
@@ -385,6 +385,7 @@ void Selection::before_resize() {
     verify();  // what is carried must still be the selected text
     if (!active_) return;
     BufferLines bl(t_);
+    if (!bl.can_carry()) return;  // after_resize() clears it
     const RowPos pos[4] = {anchor_lo_, anchor_hi_, range_.start, range_.end};
     for (int i = 0; i < 4; ++i) {
         detail::LinePos lp = bl.to_line_pos(pos[i]);
@@ -396,6 +397,10 @@ void Selection::before_resize() {
 void Selection::after_resize() {
     if (!active_) return;
     BufferLines bl(t_);
+    if (!bl.can_carry()) {
+        clear();
+        return;
+    }
     RowPos pos[4];
     for (int i = 0; i < 4; ++i) pos[i] = bl.from_line_pos(detail::LinePos{carried_[i].line, carried_[i].offset});
     // The reflow cropped the selected text (rows below the cursor that no

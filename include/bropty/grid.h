@@ -77,16 +77,21 @@ public:
     void mark_all_dirty() noexcept;
     [[nodiscard]] bool dirty(int y) const noexcept { return dirty_[size_t(y)] != 0; }
     void clear_dirty() noexcept;
-    // Content stamp of row y: rows changed since the last set_generation()
-    // read as the current generation.
+    // Content stamp of row y. A generation owns the stamps [base, base +
+    // rows()): rows changed since the last set_generation() read as
+    // base + their storage index, so every stamp handed out is unique as
+    // long as the owner never gives two generations overlapping ranges.
     [[nodiscard]] uint64_t stamp(int y) const noexcept {
-        return changed_[size_t(y)] ? gen_ : stamp_[map_[size_t(y)]];
+        const uint32_t s = map_[size_t(y)];
+        return changed_[size_t(y)] ? base_ + s : stamp_[s];
     }
     // The storage row shown at y (stable while the row scrolls).
     [[nodiscard]] uint32_t storage(int y) const noexcept { return map_[size_t(y)]; }
-    // Fold pending changes into the stamps (at the current generation), then
-    // move to generation g (> the current one).
-    void set_generation(uint64_t g) noexcept;
+    // Fold pending changes into the stamps (the current generation's), then
+    // start a generation owning [base, base + rows()).
+    void set_generation(uint64_t base) noexcept;
+    // Start over at `base`: every row reads as changed (after a rebuild).
+    void rebase(uint64_t base) noexcept;
     // Unique per storage allocation: changes when the grid is rebuilt.
     [[nodiscard]] uint64_t id() const noexcept { return id_; }
 
@@ -110,7 +115,7 @@ private:
     std::vector<uint8_t> dirty_;
     std::vector<uint8_t> changed_;  // per screen position, rotated with map_ (so it follows the row)
     std::vector<uint64_t> stamp_;   // per storage row
-    uint64_t gen_{1};
+    uint64_t base_{1};
     uint64_t id_{0};
 
     void moved(int y0, int y1) noexcept {  // positions [y0, y1] show other rows now

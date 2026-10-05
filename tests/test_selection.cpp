@@ -276,10 +276,56 @@ void html() {
     CHECK_EQ(v.text(), std::string("red <&> bold link"));
 }
 
+// Image cells (U+10EEEE) are pictures: copying never yields them, in any
+// mode, and they trail like blanks.
+void image_cells_not_copied() {
+    const std::string ph = "\xF4\x8E\xBB\xAE";        // U+10EEEE
+    const std::string row0 = "\xCC\x8D";              // U+030D: kitty row/column diacritic 1
+    const std::string col1 = "\xCC\x8E";              // U+030E: diacritic 2
+    V v(30, 4);
+    // Kitty Unicode placeholders between and after text, with diacritics
+    // (cluster tails), in an image-id foreground.
+    v << "ab \x1b[38;5;7m" + ph + row0 + row0 + ph + row0 + col1 + "\x1b[0m cd \x1b[38;5;7m" + ph + ph + "\x1b[0m\r\n";
+    v << "next";
+    CHECK(v.t.t.may_have_image_cells());
+    v.sel().select_all();
+    const std::string all = v.text();
+    CHECK(all.find(ph) == std::string::npos);
+    CHECK(all.find(row0) == std::string::npos);
+    CHECK_EQ(all, std::string("ab  cd\nnext"));
+    // Character mode inside the placeholders.
+    v.sel().start(v.at(0, 3), SelectionMode::Character);
+    v.sel().extend(v.at(0, 4), true);
+    CHECK_EQ(v.text(), std::string(""));
+    // Block mode.
+    v.sel().start(v.at(0, 0), SelectionMode::Block);
+    v.sel().extend(v.at(1, 10));
+    CHECK_EQ(v.text(), std::string("ab  cd\nnext"));
+    // HTML leaves them out too.
+    v.sel().select_all();
+    CHECK(v.sel().html(v.t.t.palette()).find(ph) == std::string::npos);
+
+    // A sixel image is drawn in image cells under the cursor: text around
+    // it copies, the image does not.
+    V s(20, 6);
+    s << "pic:";
+    s << "\x1bPq#0;2;100;0;0#0~~~~~~~~~~~~~~~~-~~~~~~~~~~~~~~~~\x1b\\";
+    s << "\r\nafter";
+    bool any_image_cell = false;
+    for (int y = 0; y < s.t.t.rows(); ++y)
+        for (int x = 0; x < s.t.t.cols(); ++x) any_image_cell |= s.t.t.row(y)[x].cp() == 0x10EEEE;
+    CHECK(any_image_cell);
+    s.sel().select_all();
+    CHECK(s.text().find(ph) == std::string::npos);
+    CHECK(s.text().find("pic:") != std::string::npos);
+    CHECK(s.text().find("after") != std::string::npos);
+}
+
 } // namespace
 
 int main() {
     init_test();
+    image_cells_not_copied();
     character_and_wrap();
     hard_breaks_and_trailing_blanks();
     wide_and_clusters();

@@ -14,6 +14,7 @@
 // An OSC 8 link wins over detected text at the same cell.
 
 #include "bropty/position.h"
+#include "bropty/row_source.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -23,8 +24,6 @@
 #include <vector>
 
 namespace bropty {
-
-class Terminal;
 
 enum class LinkKind : uint8_t { Hyperlink, Url, Path };
 
@@ -43,12 +42,15 @@ struct LinkHit {
     RowRange range;  // the link's cells, as a stream range (may span rows)
     LinkKind kind{LinkKind::Url};
     std::string target;   // URI (OSC 8 / URL) or path text
-    uint32_t link_id{0};  // OSC 8 hyperlink id (Style::link), 0 otherwise
+    // OSC 8 hyperlink id (Style::link) over a Terminal; 0 for other links,
+    // and over other sources (whose id spaces may differ by row).
+    uint32_t link_id{0};
 };
 
-// The link at cell `cell` of the terminal's active buffer, if any.
-std::optional<LinkHit> link_at(const Terminal& t, RowPos cell);
+// The link at cell `cell` of a buffer (a Terminal's active buffer, or any
+// RowSource), if any.
+std::optional<LinkHit> link_at(const RowSource& source, RowPos cell);
 // Every link in the logical lines that touch rows [row0, row1).
-void links_in_rows(const Terminal& t, int64_t row0, int64_t row1, std::vector<LinkHit>& out);
+void links_in_rows(const RowSource& source, int64_t row0, int64_t row1, std::vector<LinkHit>& out);
 
 } // namespace bropty

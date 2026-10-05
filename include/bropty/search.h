@@ -19,8 +19,15 @@
 // A match lies within one logical line (a match may span the rows of a
 // wrapped line). Lines are matched as UTF-8 where empty cells read as
 // spaces and trailing empty cells are dropped.
+//
+// The buffer is any RowSource (row_source.h). When the backward scan
+// reaches history rows the source does not hold, step() asks for them
+// (RowSource::request_rows) and stops there, still returning true
+// (waiting() says so); call step() again once the source has them. Over a
+// source that is not a Terminal, a resize restarts the search.
 
 #include "bropty/position.h"
+#include "bropty/row_source.h"
 
 #include <atomic>
 #include <chrono>
@@ -35,8 +42,6 @@
 #include <vector>
 
 namespace bropty {
-
-class Terminal;
 
 class SearchMatcher {
 public:
@@ -62,7 +67,7 @@ private:
 
 class Search {
 public:
-    explicit Search(const Terminal& t);
+    explicit Search(const RowSource& source);
 
     void start(std::shared_ptr<SearchMatcher> matcher);
     // Drop the search and its matches.
@@ -74,7 +79,9 @@ public:
     void cancel() noexcept { cancel_.store(true, std::memory_order_relaxed); }
 
     [[nodiscard]] bool active() const noexcept { return matcher_ != nullptr; }
-    [[nodiscard]] bool complete() const noexcept { return active() && scan_next_ < scan_floor_; }
+    [[nodiscard]] bool complete() const noexcept { return active() && scan_next_ < scan_floor_ && gaps_.empty(); }
+    // The scan is stopped at rows the source does not hold yet (requested).
+    [[nodiscard]] bool waiting() const noexcept { return active() && waiting_; }
     [[nodiscard]] size_t size() const noexcept { return frozen_.size() + live_.size(); }
     // Matches in buffer order.
     [[nodiscard]] const RowRange& at(size_t i) const noexcept {
@@ -105,12 +112,21 @@ private:
         int64_t line;
         size_t start, end;  // cell offsets
     };
-    void match_line(int64_t number, std::vector<RowRange>& out);
+    // Match line `number` into `out`; false (nothing matched, the rows
+    // requested) when a row of it is missing from the source. `prev` / `next`
+    // get the lines before and after it.
+    bool match_line(int64_t number, std::vector<RowRange>& out, int64_t* prev, int64_t* next);
     void rescan_live(int64_t from_line);
     bool take_cancel();
     void refresh_current();
+    bool fill_gaps();  // false: waiting for rows
+    void insert_frozen(const std::vector<RowRange>& found);
 
-    const Terminal& t_;
+    const RowSource& t_;
+    bool waiting_{false};
+    // Lines [first, second) that left the screen while the source did not
+    // hold their rows: matched (into frozen_) once it does.
+    std::vector<std::pair<int64_t, int64_t>> gaps_;
     std::shared_ptr<SearchMatcher> matcher_;
     std::atomic<bool> cancel_{false};
     std::deque<RowRange> frozen_;  // matches in lines wholly in history, in order
