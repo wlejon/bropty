@@ -79,6 +79,10 @@ id, plain or base64, title / body / urgency; `p=?` is answered) all reach
 its default passes title and body on to the older `notification()`. Pending
 OSC 99 chunks are bounded in size and in number of ids.
 
+`Terminal::set_base_palette` installs the host's theme: it replaces the live
+palette (dropping program OSC 4 / 10 / 11 / 12 overrides) and is what OSC 104,
+OSC 110 / 111 / 112 and RIS reset to.
+
 ## Graphics
 
 bropty accepts the kitty graphics protocol (transmission, placements,

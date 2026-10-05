@@ -203,27 +203,25 @@ void Terminal::osc_dispatch(std::string_view payload, bool bel) {
     case 22: osc_pointer(rest, bel); break;
     case 52: osc_clipboard(rest, bel); break;
     case 104:
+        // Back to the host's theme (set_base_palette), not xterm's table.
         if (rest.empty()) {
-            Palette fresh = Palette::standard();
-            palette_.colors = fresh.colors;
+            palette_.colors = base_palette_.colors;
         } else {
             while (!rest.empty()) {
                 int idx = to_int(next_field(rest), -1);
-                if (idx >= 0 && idx < 256) palette_.colors[size_t(idx)] = Palette::standard_index(uint8_t(idx));
+                if (idx >= 0 && idx < 256) palette_.colors[size_t(idx)] = base_palette_.colors[size_t(idx)];
             }
         }
         if (host_) host_->palette_changed();
         break;
     case 110:
     case 111:
-    case 112: {
-        Palette fresh;
-        if (cmd == 110) palette_.foreground = fresh.foreground;
-        if (cmd == 111) palette_.background = fresh.background;
-        if (cmd == 112) palette_.cursor = fresh.cursor;
+    case 112:
+        if (cmd == 110) palette_.foreground = base_palette_.foreground;
+        if (cmd == 111) palette_.background = base_palette_.background;
+        if (cmd == 112) palette_.cursor = base_palette_.cursor;
         if (host_) host_->palette_changed();
         break;
-    }
     case 133: osc_semantic(rest); break;
     case 1337:
         if (opts_.graphics.iterm2) osc_iterm(rest);

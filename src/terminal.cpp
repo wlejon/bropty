@@ -43,7 +43,8 @@ Terminal::Terminal(const TerminalOptions& options)
       scrollback_(opts_.scrollback_rows, opts_.cols),
       gfx_(std::make_unique<detail::Graphics>(opts_.graphics)) {
     parser_.set_max_string_bytes(opts_.max_string_bytes);
-    palette_ = Palette::standard();
+    base_palette_ = Palette::standard();
+    palette_ = base_palette_;
     primary_.grid.rebase(reserve_stamps());
     alt_.grid.rebase(reserve_stamps());
     reset();
@@ -75,7 +76,7 @@ void Terminal::reset() {
     reset_margins();
     tabs_.assign(size_t(cols_), 0);
     for (int x = 8; x < cols_; x += 8) tabs_[size_t(x)] = 1;
-    palette_ = Palette::standard();
+    palette_ = base_palette_;
     cursor_shape_ = CursorShape::Block;
     cursor_shape_blink_ = true;
     title_stack_.clear();
@@ -98,6 +99,13 @@ void Terminal::feed(std::string_view bytes) {
     graphics_after_feed();
     maybe_collect_garbage();
     ++change_count_;  // observers (resize, screen switch) may have looked mid-feed
+}
+
+void Terminal::set_base_palette(const Palette& p) {
+    ++change_count_;
+    base_palette_ = p;
+    palette_ = p;
+    if (host_) host_->palette_changed();
 }
 
 RowView Terminal::row_at(int64_t abs) const {

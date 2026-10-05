@@ -219,6 +219,13 @@ public:
     [[nodiscard]] const Style& style(uint32_t id) const noexcept { return styles_.get(id); }
     [[nodiscard]] const StyleTable& styles() const noexcept { return styles_; }
     [[nodiscard]] const Palette& palette() const noexcept override { return palette_; }
+    // The host's theme: what OSC 104 (all colors or some), OSC 110 / 111 /
+    // 112 and RIS reset to. Setting it replaces the live palette entirely,
+    // dropping what programs set with OSC 4 / 10 / 11 / 12 (as kitty does on
+    // a theme change), and calls TerminalHost::palette_changed(). Until set:
+    // Palette::standard().
+    void set_base_palette(const Palette& p);
+    [[nodiscard]] const Palette& base_palette() const noexcept { return base_palette_; }
     [[nodiscard]] const Hyperlink* hyperlink(uint32_t id) const noexcept;
     // RowSource: the terminal's hyperlink ids are one space for every row.
     [[nodiscard]] const std::string* hyperlink_uri(int64_t row, uint32_t id) const noexcept override {
@@ -537,6 +544,7 @@ private:
     Scrollback scrollback_;
     StyleTable styles_;
     Palette palette_;
+    Palette base_palette_;
     Modes modes_;
     std::unordered_map<int, bool> xtsaved_;  // XTSAVE: DEC private mode -> set
 

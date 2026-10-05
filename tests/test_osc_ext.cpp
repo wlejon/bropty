@@ -219,6 +219,44 @@ void notifications() {
     if (!dx.notes.empty()) CHECK_EQ(dx.notes[0].urgency, 0);
 }
 
+void base_palette() {
+    T t(20, 5);
+    // Default: today's behaviour.
+    CHECK(t.t.base_palette().colors == Palette::standard().colors);
+    CHECK(t.t.base_palette().foreground == Palette{}.foreground);
+
+    Palette theme = Palette::standard();
+    theme.colors[1] = Rgb{1, 2, 3};
+    theme.colors[200] = Rgb{4, 5, 6};
+    theme.foreground = Rgb{10, 11, 12};
+    theme.background = Rgb{20, 21, 22};
+    theme.cursor = Rgb{30, 31, 32};
+
+    t << "\x1b]4;1;rgb:ff/00/00\x07\x1b]10;rgb:ff/ff/ff\x07";  // program overrides
+    const int before = t.host.palette_changes;
+    t.t.set_base_palette(theme);
+    CHECK_EQ(t.host.palette_changes, before + 1);
+    CHECK(t.t.palette().colors[1] == (Rgb{1, 2, 3}));  // overrides dropped
+    CHECK(t.t.palette().foreground == (Rgb{10, 11, 12}));
+
+    // OSC 104 per index and all, 110 / 111 / 112 reset to the theme.
+    t << "\x1b]4;1;rgb:ff/00/00;200;rgb:00/ff/00\x07";
+    t << "\x1b]104;1\x07";
+    CHECK(t.t.palette().colors[1] == (Rgb{1, 2, 3}));
+    CHECK(t.t.palette().colors[200] == (Rgb{0, 255, 0}));
+    t << "\x1b]104\x07";
+    CHECK(t.t.palette().colors[200] == (Rgb{4, 5, 6}));
+    t << "\x1b]10;rgb:ff/ff/ff\x07\x1b]11;rgb:ff/ff/ff\x07\x1b]12;rgb:ff/ff/ff\x07";
+    t << "\x1b]110\x07\x1b]111\x07\x1b]112\x07";
+    CHECK(t.t.palette().foreground == (Rgb{10, 11, 12}));
+    CHECK(t.t.palette().background == (Rgb{20, 21, 22}));
+    CHECK(t.t.palette().cursor == (Rgb{30, 31, 32}));
+    // RIS too.
+    t << "\x1b]4;1;rgb:ff/00/00\x07\x1b]11;rgb:ff/ff/ff\x07\x1b" "c";
+    CHECK(t.t.palette().colors[1] == (Rgb{1, 2, 3}));
+    CHECK(t.t.palette().background == (Rgb{20, 21, 22}));
+}
+
 } // namespace
 
 int main() {
@@ -226,5 +264,6 @@ int main() {
     pointer_shapes();
     pointer_screens_and_host();
     notifications();
+    base_palette();
     return check::finish("test_osc_ext");
 }
