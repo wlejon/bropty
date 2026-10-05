@@ -4,12 +4,19 @@
 // the measurement cannot silently test a broken path.
 //   bench_throughput [megabytes-per-corpus [corpus]]   (default 32 in Release, 4 in Debug)
 // BENCH_SB=<rows> overrides the scrollback size (0 isolates the screen path).
+//
+// Terminals are heap-allocated, as hosts hold them. On the stack the result
+// moved by 1-2% with the object's placement in the frame: adding a 32-byte
+// base class to Terminal (RowSource) "cost" ~1.5% on tui there while the
+// emulation code was unchanged, and the same build on the heap measured
+// identical to its parent.
 #include "bropty/terminal.h"
 #include "bropty/view.h"
 #include "check.h"
 
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <thread>
 #include <cstdlib>
 #include <cstring>
@@ -154,7 +161,8 @@ double timed(const std::string& corpus, size_t reps, Feed&& feed) {
 // host loop a TerminalView documents (publish only once the reader took the
 // last frame) with a reader drawing at 240 Hz.
 double with_frames(const std::string& corpus, size_t reps, const TerminalOptions& o, bool paced) {
-    Terminal t(o);
+    const auto owned = std::make_unique<Terminal>(o);
+    Terminal& t = *owned;
     TerminalView view(t);
     FrameChannel ch;
     std::atomic<bool> stop{false};
@@ -195,7 +203,8 @@ void run(const char* name, const std::string& corpus, size_t target_bytes, int c
     o.cols = cols;
     o.rows = rows;
     o.scrollback_rows = std::getenv("BENCH_SB") ? size_t(std::atoi(std::getenv("BENCH_SB"))) : 10000;
-    Terminal t(o);
+    const auto owned = std::make_unique<Terminal>(o);
+    Terminal& t = *owned;
     size_t reps = std::max<size_t>(1, target_bytes / corpus.size());
     t.feed(corpus);  // warm up (style table, scrollback blocks)
     double rate = timed(corpus, reps, [&](std::string_view s) { t.feed(s); });

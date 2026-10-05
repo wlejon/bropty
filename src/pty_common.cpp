@@ -49,7 +49,10 @@ std::string windows_command_line(std::string_view command, const std::vector<std
     // never escapes (and file names cannot contain quotes).
     std::string line;
     if (command.empty() || command.find_first_of(" \t") != std::string_view::npos) {
-        line = "\"" + std::string(command) + "\"";
+        // Appended, not "\"" + std::string(...): GCC 12 warns -Wrestrict on that (PR 105651).
+        line += '"';
+        line += command;
+        line += '"';
     } else {
         line = std::string(command);
     }

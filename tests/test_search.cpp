@@ -1,10 +1,13 @@
-// Scrollback search: the literal matcher, incremental matching across screen
+// Scrollback search: the literal and regex matchers, incremental matching across screen
 // and history, navigation, wrapped / wide matches, host matchers, eviction,
 // reflow and cancellation. Incremental results are always compared with a
 // search started from scratch on the final state.
+#include "bropty/search_regex.h"
 #include "bropty/view.h"
 #include "term_helpers.h"
 
+#include <chrono>
+#include <string_view>
 #include <thread>
 
 using namespace bropty;
@@ -212,11 +215,136 @@ void cancel_and_switch() {
     CHECK_EQ(view.search().at(0).start.row, t.t.screen_top_row());
 }
 
+using Ranges = std::vector<std::pair<size_t, size_t>>;
+
+Ranges find_with(const std::shared_ptr<RegexMatcher>& m, std::string_view line) {
+    Ranges out;
+    CHECK(m != nullptr);
+    if (m) m->find(line, out);
+    return out;
+}
+
+void regex_matcher() {
+    auto m = RegexMatcher::create("ne+dle");
+    CHECK(find_with(m, "a neeedle and a needle") == (Ranges{{2, 9}, {16, 22}}));
+
+    // Smart case (the default): lowercase pattern ignores case, an uppercase literal does not.
+    CHECK(find_with(RegexMatcher::create("needle"), "NEEDLE Needle") == (Ranges{{0, 6}, {7, 13}}));
+    CHECK(RegexMatcher::create("needle")->case_insensitive());
+    CHECK(find_with(RegexMatcher::create("Needle"), "NEEDLE Needle needle") == (Ranges{{7, 13}}));
+    CHECK(!RegexMatcher::create("Needle")->case_insensitive());
+    RegexSearchOptions ci;
+    ci.case_mode = SearchCase::Insensitive;
+    CHECK(find_with(RegexMatcher::create("Needle", ci), "needle") == (Ranges{{0, 6}}));
+    RegexSearchOptions cs;
+    cs.case_mode = SearchCase::Sensitive;
+    CHECK(find_with(RegexMatcher::create("needle", cs), "NEEDLE needle") == (Ranges{{7, 13}}));
+    // Unicode case folding beyond the literal matcher's tables.
+    CHECK(find_with(RegexMatcher::create("stra\xc3\x9f" "e", ci), "STRA\xe1\xba\x9e" "E") == (Ranges{{0, 8}}));
+
+    // Unicode classes, byte offsets into UTF-8.
+    CHECK(find_with(RegexMatcher::create("\\p{Greek}+"), "abc \xcf\x83\xce\xbf\xcf\x86\xce\xb9\xce\xb1!") ==
+          (Ranges{{4, 14}}));
+    // Empty matches give no highlight; non-empty ones around them still do.
+    CHECK(find_with(RegexMatcher::create("x*"), "abxxc\xc3\xa9x") == (Ranges{{2, 4}, {7, 8}}));
+    CHECK(find_with(RegexMatcher::create("^"), "anything").empty());
+    // Whole words and literal patterns.
+    RegexSearchOptions word;
+    word.whole_word = true;
+    CHECK(find_with(RegexMatcher::create("foo", word), "foo foobar barfoo foo") == (Ranges{{0, 3}, {18, 21}}));
+    RegexSearchOptions lit;
+    lit.literal = true;
+    CHECK(find_with(RegexMatcher::create("a.b(", lit), "axb( a.b(") == (Ranges{{5, 9}}));
+
+    // Syntax errors are reported, not thrown.
+    std::string error;
+    CHECK(RegexMatcher::create("(unclosed", &error) == nullptr);
+    CHECK(!error.empty());
+    CHECK(RegexMatcher::create("a\\", &error) == nullptr);
+}
+
+// Regex search over the buffer: history, soft-wrapped rows, wide cells, live
+// output; always equal to a search from scratch.
+void regex_in_buffer() {
+    th::T t(40, 10, 1000);
+    for (int i = 0; i < 200; ++i) t << "line " + std::to_string(i) + (i % 10 == 3 ? " id=0x" + std::to_string(1000 + i) : "") + "\r\n";
+    auto hex = RegexMatcher::create("id=0x[0-9a-f]+");
+    Search s(t.t);
+    s.start(hex);
+    while (s.step(std::chrono::microseconds(0))) {}
+    CHECK(s.complete());
+    CHECK_EQ(s.size(), size_t(20));
+    CHECK_EQ(text_of(t.t, s.at(0)), std::string("id=0x1003"));
+    CHECK_EQ(text_of(t.t, s.at(19)), std::string("id=0x1193"));
+    CHECK(all(s) == scratch(t.t, hex));
+
+    // ^ and $ anchor to logical lines: a soft-wrapped line is one line.
+    th::T w(10, 4);
+    w << "xxxxxxxneedlexx\r\n\xe4\xb8\xad" "needle";
+    auto across = RegexMatcher::create("ne+dle");
+    Search sw(w.t);
+    sw.start(across);
+    while (sw.step()) {}
+    CHECK_EQ(sw.size(), size_t(2));
+    const int64_t top = w.t.screen_top_row();
+    CHECK(sw.at(0).start == (RowPos{top, 7}));
+    CHECK(sw.at(0).end == (RowPos{top + 1, 3}));  // spans the soft wrap
+    CHECK(sw.at(1).start == (RowPos{top + 2, 2}));  // after the wide 中
+    CHECK(scratch(w.t, RegexMatcher::create("^dlexx")).empty());  // row 2 of the line, not a line start
+    CHECK_EQ(scratch(w.t, RegexMatcher::create("needlexx$")).size(), size_t(1));
+    auto wide = scratch(w.t, RegexMatcher::create("^\\p{Han}\\w+$"));
+    CHECK_EQ(wide.size(), size_t(1));
+    if (!wide.empty()) {
+        CHECK(wide[0].start == (RowPos{top + 2, 0}));
+        CHECK_EQ(text_of(w.t, wide[0]), std::string("\xe4\xb8\xad" "needle"));
+    }
+
+    // Live output through a view.
+    th::T live(30, 5, 50);
+    TerminalView view(live.t);
+    auto num = RegexMatcher::create("\\b\\d{2,}\\b");
+    view.search().start(num);
+    for (int i = 0; i < 60; ++i) {
+        live << "\r\nrow " + std::to_string(i * 7);
+        if (i % 9 == 0) {
+            view.sync();
+            view.search().step(std::chrono::microseconds(0));
+        }
+    }
+    view.sync();
+    while (view.search().step()) {}
+    CHECK(all(view.search()) == scratch(live.t, num));
+    CHECK(view.search().size() > 0);
+}
+
+// Patterns that backtracking engines take exponential time on, over a long
+// soft-wrapped line: the search finishes promptly with the right answer.
+void regex_linear_time() {
+    th::T t(80, 24, 2000);
+    std::string line(60000, 'a');  // 750 wrapped rows
+    t << line + "!\r\n" + line + "\r\n";
+    for (const char* p : {"^(a+)+$", "^(a|aa)+$", "(a*)*b", "^(.*a){10}$"}) {
+        auto m = RegexMatcher::create(p);
+        CHECK(m != nullptr);
+        const auto t0 = std::chrono::steady_clock::now();
+        auto found = scratch(t.t, m);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        const bool anchored_all_a = std::string_view(p) != "(a*)*b";
+        // Only the second line (all 'a', no '!') matches the anchored patterns.
+        CHECK_EQ(found.size(), size_t(anchored_all_a ? 1 : 0));
+        if (anchored_all_a && !found.empty()) CHECK(found[0].end.row - found[0].start.row >= 749);
+        CHECK(ms < 5000.0);  // backtracking would not finish this side of the heat death
+    }
+}
+
 } // namespace
 
 int main() {
     init_test();
     literal_matcher();
+    regex_matcher();
+    regex_in_buffer();
+    regex_linear_time();
     across_history();
     wrapped_and_wide();
     host_matcher_and_live_output();

@@ -3,7 +3,9 @@
 **bropty** is a headless terminal library for the Bro ecosystem: VT/xterm
 emulation, the cell grid and scrollback a renderer reads, and the PTY
 plumbing that feeds it. It has no rendering, windowing or scripting
-dependency (no bro, no bronze); C++20, its own CMake and ctest suite.
+dependency (no bro, no bronze); C++20, its own CMake and ctest suite. The
+one sibling it uses is [brosearch](../brosearch), for regex scrollback
+search, resolved from `../brosearch` or `-DBROSEARCH_DIR=<path>`.
 
 ## Layout
 
@@ -23,6 +25,7 @@ dependency (no bro, no bronze); C++20, its own CMake and ctest suite.
 | `bropty/frame.h` | `Frame` snapshots for a renderer thread: copy-on-write immutable rows (only rows written since the last frame are copied), cursor, modes, palette, highlights (selection, matches, hover) and per-row damage; `FrameChannel`, a lock-free triple-buffered handoff. |
 | `bropty/selection.h` | `Selection`: character / word (configurable word characters) / line / rectangular / OSC 133 zone selection anchored to content (survives scrolling, output and reflow; cleared when the text under it changes); plain-text extraction the way xterm / kitty / Alacritty do it, and styled HTML. |
 | `bropty/search.h` | `Search` over the screen and history with a host-supplied `SearchMatcher` (`LiteralMatcher`, case-insensitive by default, built in): incremental and budgeted, cancellable, matches anchored through output and reflow, next / previous navigation. |
+| `bropty/search_regex.h` | `RegexMatcher`: regex search on brosearch's linear-time engine (Rust `regex` / ripgrep syntax, Unicode classes and case folding); sensitive, insensitive or smart case, whole-word and literal options. `^` / `$` anchor to logical lines, so a match can span soft-wrapped rows; no pattern can take more than linear time. |
 | `bropty/links.h` | URL and path detection over logical lines (wrapped links work), alongside OSC 8 hyperlinks: `link_at`, `links_in_rows`. |
 | `bropty/session.h` | `Session`: a `Terminal` attached to a PTY, sending key / text / paste / mouse / focus input encoded for the terminal's current modes; an output tap (`set_feed_tap`) sees every chunk before the terminal does (recording, mirroring). |
 | `bropty/input.h` | Pure input encoders: kitty keyboard protocol (all five enhancement flags), xterm legacy keys (DECCKM, DECKPAM, DECBKM, Alt/Meta as ESC or 8th bit, the XTMODKEYS resources modifyCursorKeys / modifyFunctionKeys / modifyKeypadKeys / modifyOtherKeys and XTFMTKEYS formatOtherKeys), mouse reports in every tracking mode and encoding, bracketed paste that cannot be terminated from inside, focus reports. |

@@ -3,8 +3,9 @@
 //
 // The buffer is read as logical lines (soft-wrapped rows joined) straight
 // from the compact history store and the screen; each line's text goes to a
-// host-supplied SearchMatcher (bropty knows nothing about regex engines; a
-// literal / case-insensitive LiteralMatcher is built in). Matches are held as
+// SearchMatcher: the built-in literal / case-insensitive LiteralMatcher,
+// RegexMatcher (search_regex.h, on brosearch's linear-time regex engine), or
+// one the host supplies. Matches are held as
 // absolute RowRanges (position.h), so they stay on their text as output
 // scrolls it into history; a resize carries them through the reflow.
 //

@@ -17,6 +17,23 @@ if(MSVC)
     endif()
 endif()
 
+# ---- brosearch -----------------------------------------------------------------
+# Regex scrollback search (RegexMatcher, search_regex.h) runs on brosearch's
+# linear-time engine. Resolved like the other siblings: an existing `brosearch`
+# target (a superbuild already added it) wins; otherwise the standalone repo
+# beside this one (../brosearch), overridable with -DBROSEARCH_DIR=<path>.
+if(NOT TARGET brosearch)
+    get_filename_component(_brosearch_default "${CMAKE_CURRENT_SOURCE_DIR}/../brosearch" ABSOLUTE)
+    set(BROSEARCH_DIR "${_brosearch_default}" CACHE PATH "Path to the brosearch repo")
+    if(NOT EXISTS "${BROSEARCH_DIR}/CMakeLists.txt")
+        message(FATAL_ERROR "bropty needs brosearch: clone it beside bropty (../brosearch) or pass -DBROSEARCH_DIR=<path>")
+    endif()
+    message(STATUS "bropty: brosearch from ${BROSEARCH_DIR}")
+    set(BROSEARCH_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(BROSEARCH_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${BROSEARCH_DIR}" "${CMAKE_BINARY_DIR}/brosearch" EXCLUDE_FROM_ALL)
+endif()
+
 set(BROPTY_SOURCES
     src/version.cpp
     src/color.cpp
@@ -38,6 +55,7 @@ set(BROPTY_SOURCES
     src/selection.cpp
     src/selection_text.cpp
     src/search.cpp
+    src/search_regex.cpp
     src/links.cpp
     src/view.cpp
     src/frame.cpp
@@ -91,6 +109,7 @@ endif()
 
 find_package(Threads REQUIRED)
 target_link_libraries(bropty PUBLIC Threads::Threads)
+target_link_libraries(bropty PRIVATE brosearch)
 # shm_open (kitty t=s) lives in librt on older glibc.
 if(UNIX AND NOT APPLE)
     include(CheckLibraryExists)
