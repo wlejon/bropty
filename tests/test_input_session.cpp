@@ -116,8 +116,9 @@ void modify_other_keys() {
     CHECK_EQ(h.s.terminal().modes().modify_other_keys, 0);
     h.s.feed("\x1b[>4;2m\x1b[>m");  // no parameters: reset everything
     CHECK_EQ(h.s.terminal().modes().modify_other_keys, 0);
-    h.s.feed("\x1b[>4;2m\x1b[>4n");  // XTMODKEYS disable
-    CHECK_EQ(h.s.terminal().modes().modify_other_keys, 0);
+    h.s.feed("\x1b[>4;2m\x1b[>4n");  // XTMODKEYS disable: -1, encodes like 0
+    CHECK_EQ(h.s.terminal().modes().modify_other_keys, -1);
+    CHECK_EQ(h.key(ch(',', Mod_Ctrl)), std::string(","));
     h.s.feed("\x1b[>4;2m\x1b[>1;2m");  // another resource: no effect on 4
     CHECK_EQ(h.s.terminal().modes().modify_other_keys, 2);
     h.s.feed("\x1b[!p");  // DECSTR resets it (xterm ReallyReset)

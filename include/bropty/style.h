@@ -49,13 +49,19 @@ struct StyleHash {
         h = h * 0x9E3779B97F4A7C15ull ^ s.underline_color.packed();
         h = h * 0x9E3779B97F4A7C15ull ^ (uint64_t(s.attrs) | (uint64_t(s.underline) << 16));
         h = h * 0x9E3779B97F4A7C15ull ^ s.link;
-        return size_t(h ^ (h >> 29));
+        h ^= h >> 29;
+        h *= 0xBF58476D1CE4E5B9ull;  // finalise: the table indexes by the low bits
+        return size_t(h ^ (h >> 32));
     }
 };
 
 // Interning table. Id 0 is always the default style. Ids are stable until a
 // sweep; sweeps run only at safe points (end of Terminal::feed / resize), so
 // ids read from cells stay valid for the duration of a frame.
+//
+// The index is an open-addressed (linear probing) table of {hash, id} slots
+// kept at most half full; a lookup compares 32 hash bits before touching the
+// Style. Sweeps rebuild it, so it never carries tombstones.
 class StyleTable {
 public:
     StyleTable();
@@ -73,10 +79,14 @@ public:
     void clear();
 
 private:
+    void index_insert(uint32_t hash, uint32_t id);
+    void rebuild_index(size_t slots);
+
     std::vector<Style> styles_;
     std::vector<uint32_t> free_;
     std::vector<uint8_t> in_use_;
-    std::unordered_map<Style, uint32_t, StyleHash> index_;
+    std::vector<uint64_t> index_;  // (hash << 32) | id, 0 = empty (id 0 is never indexed)
+    size_t indexed_{0};
     size_t sweep_threshold_{4096};
 };
 

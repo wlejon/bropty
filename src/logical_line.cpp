@@ -2,27 +2,18 @@
 
 namespace bropty::detail {
 
-void write_varint(std::string& out, uint64_t v) {
-    while (v >= 0x80) {
-        out.push_back(char(uint8_t(v) | 0x80));
-        v >>= 7;
-    }
-    out.push_back(char(uint8_t(v)));
-}
-
-void write_utf8(std::string& out, char32_t cp) { append_utf8(out, cp); }
-
 namespace {
-void write_color(std::string& out, Color c) {
-    out.push_back(char(c.kind()));
+char* put_color(char* p, Color c) {
+    *p++ = char(c.kind());
     if (c.is_indexed()) {
-        out.push_back(char(c.index()));
+        *p++ = char(c.index());
     } else if (c.is_rgb()) {
         Rgb v = c.rgb_value();
-        out.push_back(char(v.r));
-        out.push_back(char(v.g));
-        out.push_back(char(v.b));
+        *p++ = char(v.r);
+        *p++ = char(v.g);
+        *p++ = char(v.b);
     }
+    return p;
 }
 
 Color read_color(const uint8_t*& p, const uint8_t* end) {
@@ -38,7 +29,7 @@ Color read_color(const uint8_t*& p, const uint8_t* end) {
 }
 } // namespace
 
-void write_style(std::string& out, const Style& s) {
+char* put_style(char* p, const Style& s) {
     uint8_t mask = 0;
     if (!s.fg.is_default()) mask |= 1;
     if (!s.bg.is_default()) mask |= 2;
@@ -46,13 +37,14 @@ void write_style(std::string& out, const Style& s) {
     if (s.attrs) mask |= 8;
     if (s.underline != Underline::None) mask |= 16;
     if (s.link) mask |= 32;
-    out.push_back(char(mask));
-    if (mask & 1) write_color(out, s.fg);
-    if (mask & 2) write_color(out, s.bg);
-    if (mask & 4) write_color(out, s.underline_color);
-    if (mask & 8) write_varint(out, s.attrs);
-    if (mask & 16) out.push_back(char(s.underline));
-    if (mask & 32) write_varint(out, s.link);
+    *p++ = char(mask);
+    if (mask & 1) p = put_color(p, s.fg);
+    if (mask & 2) p = put_color(p, s.bg);
+    if (mask & 4) p = put_color(p, s.underline_color);
+    if (mask & 8) p = put_varint(p, s.attrs);
+    if (mask & 16) *p++ = char(s.underline);
+    if (mask & 32) p = put_varint(p, s.link);
+    return p;
 }
 
 Style read_style(const uint8_t*& p, const uint8_t* end) {

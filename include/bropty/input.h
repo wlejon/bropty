@@ -121,6 +121,16 @@ struct KeyboardModes {
     bool app_keypad{false};           // DECKPAM / DECNKM (?66)
     bool backarrow_sends_bs{false};   // DECBKM (?67)
     int modify_other_keys{0};         // XTMODKEYS 4 (CSI > 4 ; Pv m): 0, 1, 2
+    // xterm's modifyCursorKeys / modifyFunctionKeys / modifyKeypadKeys (XTMODKEYS
+    // 1, 2, 3) for a modified key: -1 drops the modifier; 0 puts it first
+    // (SS3 5 A, SS3 5 P, CSI 5 ~ forms keep their type); 1 forces CSI (CSI 5 A);
+    // 2 makes it the second parameter (CSI 1;5 A); 3 also marks the sequence
+    // private (CSI > 1;5 A). Tilde keys already carry the modifier second, so
+    // 0..2 all give CSI n;m ~ and 3 gives CSI > n;m ~.
+    int modify_cursor_keys{2};        // arrows, Home, End, KP_Begin
+    int modify_function_keys{2};      // F1-F12, editing keys, Menu
+    int modify_keypad_keys{0};        // the DECKPAM application keypad
+    int format_other_keys{0};         // XTFMTKEYS 4: 1 sends modifyOtherKeys as CSI code;m u
     bool alt_sends_escape{true};      // ?1039
     bool meta_sends_escape{true};     // ?1036
 

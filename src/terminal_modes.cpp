@@ -27,6 +27,11 @@ void set_encoding(Modes& m, MouseEncoding e, bool on) {
 void Terminal::set_private_mode(int mode, bool on) {
     switch (mode) {
     case 1: modes_.app_cursor_keys = on; break;
+    case 3:
+        if (modes_.allow_deccolm) set_column_mode(on);
+        break;
+    case 40: modes_.allow_deccolm = on; break;
+    case 95: modes_.deccolm_no_clear = on; break;
     case 5:
         if (modes_.reverse_video != on) {
             modes_.reverse_video = on;
@@ -104,7 +109,9 @@ int Terminal::private_mode_state(int mode) const {
     auto b = [](bool v) { return v ? 1 : 2; };
     switch (mode) {
     case 1: return b(modes_.app_cursor_keys);
-    case 3: return 4;  // DECCOLM is not supported
+    case 3: return b(modes_.deccolm);
+    case 40: return b(modes_.allow_deccolm);
+    case 95: return b(modes_.deccolm_no_clear);
     case 5: return b(modes_.reverse_video);
     case 6: return b(modes_.origin);
     case 7: return b(modes_.autowrap);
@@ -137,6 +144,52 @@ int Terminal::private_mode_state(int mode) const {
     case 2031: return b(modes_.color_scheme_updates);
     case 2048: return b(modes_.in_band_resize);
     default: return 0;
+    }
+}
+
+// DECCOLM under ?40, as xterm does it: the screen is cleared unless DECNCSM
+// (?95) is set, the margins reset, the cursor homes, and the width becomes 132
+// or 80 columns (the row count is kept). The host is told so it can resize
+// its window and the pty.
+void Terminal::set_column_mode(bool wide) {
+    modes_.deccolm = wide;
+    if (!modes_.deccolm_no_clear) erase_display(2, false);
+    reset_margins();
+    move_to(0, 0);
+    const int cols = wide ? 132 : 80;
+    if (cols != cols_) {
+        resize(cols, rows_);
+        reset_margins();
+        move_to(0, 0);
+        if (host_) host_->resized_by_application(cols_, rows_);
+    }
+}
+
+namespace {
+// Modes XTSAVE records: those with a set/reset state (DECRQM 1 or 2) whose
+// setting is meaningful to replay. ?1048 saves the cursor rather than holding
+// a state, and the alternate-screen aliases restore through ?1049 semantics.
+bool xtsave_skips(int mode) { return mode == 1048 || mode == 47 || mode == 1047; }
+} // namespace
+
+// XTSAVE (CSI ? Pm s): remember the listed DEC private modes.
+void Terminal::save_private_modes(const CsiSeq& s) {
+    for (int i = 0; i < s.count; ++i) {
+        const int mode = s.raw(i, -1);
+        if (mode < 0 || xtsave_skips(mode)) continue;
+        const int st = private_mode_state(mode);
+        if (st == 1 || st == 2) xtsaved_[mode] = st == 1;
+    }
+}
+
+// XTRESTORE (CSI ? Pm r): put back what XTSAVE recorded; a mode already in
+// its saved state is left alone (so ?6 does not re-home the cursor).
+void Terminal::restore_private_modes(const CsiSeq& s) {
+    for (int i = 0; i < s.count; ++i) {
+        const int mode = s.raw(i, -1);
+        auto it = xtsaved_.find(mode);
+        if (it == xtsaved_.end()) continue;
+        if ((private_mode_state(mode) == 1) != it->second) set_private_mode(mode, it->second);
     }
 }
 

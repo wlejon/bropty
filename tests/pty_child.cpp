@@ -22,6 +22,16 @@
 //                              /dev/tty opens; then VIA-DEVTTY written to it
 //   pty_child cooked           (POSIX) print READY, then block reading stdin
 //                              in the default (cooked, ISIG) mode
+//   pty_child count <n>        raw mode, print READY, read n bytes, print
+//                              COUNT <n> (a sink for large pastes)
+//   pty_child pixels           (POSIX) print PIXELS <w>x<h> (TIOCGWINSZ pixel
+//                              size) now and after every input byte, until 'q'
+//   pty_child sleep            sleep forever, silently
+//   pty_child grandchild <how> start `pty_child sleep` detached from the
+//                              console / session and print GRANDCHILD <pid>,
+//                              then sleep. how = detached (Windows:
+//                              DETACHED_PROCESS; POSIX: setsid), breakaway
+//                              (Windows: plus CREATE_BREAKAWAY_FROM_JOB)
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -208,6 +218,74 @@ int main(int argc, char** argv) {
         out("READY\n");
         for (;;)
             if (read_byte() < 0) return 0;
+    }
+#endif
+    if (mode == "count") {
+        long long want = argc > 2 ? std::atoll(argv[2]) : 1;
+        raw_mode();
+        out("READY\n");
+        long long got = 0;
+        static char buf[64 * 1024];
+        while (got < want) {
+            size_t ask = size_t(std::min<long long>(want - got, sizeof buf));
+#if defined(_WIN32)
+            DWORD n = 0;
+            if (!ReadFile(in_handle(), buf, DWORD(ask), &n, nullptr) || n == 0) break;
+#else
+            ssize_t n = ::read(0, buf, ask);
+            if (n <= 0) break;
+#endif
+            got += static_cast<long long>(n);
+        }
+        out("COUNT " + std::to_string(got) + "\n");
+        return 0;
+    }
+    if (mode == "sleep") {
+        for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    if (mode == "grandchild") {
+        std::string how = argc > 2 ? argv[2] : "detached";
+#if defined(_WIN32)
+        wchar_t self[MAX_PATH];
+        GetModuleFileNameW(nullptr, self, MAX_PATH);
+        std::wstring line = L"\"" + std::wstring(self) + L"\" sleep";
+        STARTUPINFOW si{};
+        si.cb = sizeof si;
+        PROCESS_INFORMATION pi{};
+        DWORD flags = DETACHED_PROCESS;
+        if (how == "breakaway") flags |= CREATE_BREAKAWAY_FROM_JOB;
+        if (!CreateProcessW(nullptr, line.data(), nullptr, nullptr, FALSE, flags, nullptr, nullptr, &si, &pi)) {
+            out("GRANDCHILD-FAILED " + std::to_string(GetLastError()) + "\n");
+            return 3;
+        }
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        out("GRANDCHILD " + std::to_string(pi.dwProcessId) + "\n");
+#else
+        pid_t p = fork();
+        if (p == 0) {
+            setsid();
+            execl(argv[0], argv[0], "sleep", static_cast<char*>(nullptr));
+            _exit(127);
+        }
+        out("GRANDCHILD " + std::to_string(p) + "\n");
+#endif
+        for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+#if !defined(_WIN32)
+    if (mode == "pixels") {
+        raw_mode();
+        auto px = [] {
+            struct winsize ws {};
+            ioctl(1, TIOCGWINSZ, &ws);
+            return "PIXELS " + std::to_string(ws.ws_xpixel) + "x" + std::to_string(ws.ws_ypixel) + "\n";
+        };
+        out(px());
+        for (;;) {
+            int b = read_byte();
+            if (b < 0 || b == 'q') return 0;
+            out(px());
+        }
     }
 #endif
     if (mode == "size") {

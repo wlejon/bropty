@@ -3,8 +3,12 @@
 // compact byte encoding scrollback stores them in.
 
 #include "bropty/cell.h"
+#include "bropty/scrollback.h"
 
+#include <bit>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <utility>
 #include <vector>
@@ -58,7 +62,7 @@ struct EncodeStats {
     bool has_wide{false};
 };
 template <class ClusterAt>
-EncodeStats encode_cells(std::string& out, const Cell* cells, size_t n, const Style* styles, ClusterAt&& cluster_at);
+EncodeStats encode_cells(ByteBuf& out, const Cell* cells, size_t n, const Style* styles, ClusterAt&& cluster_at);
 
 // Decode, mapping each run's Style through `intern` (Style -> id).
 template <class Intern>
@@ -121,84 +125,122 @@ inline char* put_utf8(char* p, char32_t cp) {
 }
 
 Style read_style(const uint8_t*& p, const uint8_t* end);
-void write_style(std::string& out, const Style& s);
-void write_varint(std::string& out, uint64_t v);
-void write_utf8(std::string& out, char32_t cp);
+// A style record (see encode_cells); at most kMaxStyleBytes.
+constexpr size_t kMaxStyleBytes = 1 + 3 * 4 + 3 + 1 + 5;
+char* put_style(char* p, const Style& s);
 
 template <class ClusterAt>
-EncodeStats encode_cells(std::string& out, const Cell* cells, size_t n, const Style* styles, ClusterAt&& cluster_at) {
+EncodeStats encode_cells(ByteBuf& out, const Cell* cells, size_t n, const Style* styles, ClusterAt&& cluster_at) {
     EncodeStats stats;
+    // Consecutive runs often repeat a style (alternating colours): keep the
+    // last record's bytes instead of re-encoding the Style.
+    uint32_t cached_sid = 0;
+    char cached[kMaxStyleBytes];
+    size_t cached_len = 0;
+    // One pass per run: the header's column count is only known at the end of
+    // the run, so kHeaderSlot bytes are left for it and the run is shifted
+    // down over the unused part afterwards (a few bytes; runs are short).
+    constexpr size_t kHeaderSlot = 4;  // a varint up to 2^28: run columns < 2^27
     size_t i = 0;
     while (i < n) {
-        if (cells[i].wide() == Wide::SpacerHead || cells[i].wide() == Wide::SpacerTail) {
+        const Wide w0 = cells[i].wide();
+        if (w0 == Wide::SpacerHead || w0 == Wide::SpacerTail) {
             ++i;
             continue;
         }
-        // Collect a run of cells sharing a style.
-        uint32_t sid = cells[i].style;
-        size_t j = i;
-        uint64_t columns = 0;
-        while (j < n) {
-            const Cell& c = cells[j];
-            const Wide w = c.wide();
-            if (w == Wide::Narrow) {
-                if (c.style != sid) break;
-                ++columns;
-                ++j;
-                continue;
+        const uint32_t sid = cells[i].style;
+        // Room for the rest of the row: at most 5 bytes per cell (wide prefix
+        // + 4-byte UTF-8). Only a cluster tail can need more, and it re-reserves.
+        size_t room = kHeaderSlot + kMaxStyleBytes + (n - i) * 5;
+        char* p = out.reserve(room);
+        char* limit = p + room;
+        const size_t hdr = out.size();
+        p += kHeaderSlot;
+        const bool has_style = sid != 0 && !styles[sid].is_default();
+        if (has_style) {
+            if (sid != cached_sid || cached_len == 0) {
+                cached_len = size_t(put_style(cached, styles[sid]) - cached);
+                cached_sid = sid;
             }
-            if (w == Wide::SpacerHead || w == Wide::SpacerTail) {
-                ++j;
-                continue;
-            }
-            if (c.style != sid) break;
-            stats.has_wide = true;
-            columns += (j + 1 < n && cells[j + 1].wide() == Wide::SpacerTail) ? 2 : 1;
-            ++j;
+            std::memcpy(p, cached, cached_len);
+            p += cached_len;
         }
-        stats.columns += columns;
-        const Style& st = styles[sid];
-        bool has_style = !st.is_default();
-        write_varint(out, (columns << 1) | (has_style ? 1u : 0u));
-        if (has_style) write_style(out, st);
-        // Cells are written straight into space reserved for the whole run: at
-        // most 5 bytes per cell (wide prefix + 4-byte UTF-8). Only a cluster
-        // tail can need more, and it re-reserves.
-        size_t pos = out.size();
-        out.resize(pos + (j - i) * 5);
-        char* p = out.data() + pos;
-        char* limit = out.data() + out.size();
-        for (size_t k = i; k < j; ++k) {
-            const Cell& c = cells[k];
+        uint64_t columns = 0;
+        size_t j = i;
+        // A cell as one 64-bit word {bits, style}: it is a plain narrow ASCII
+        // (or empty) cell of this run exactly when (word & kPlainMask) == key.
+        constexpr uint64_t kPlainMask = 0xFFFFFFFF00000000ull | uint64_t(0xFFFFFFFFu & ~(Cell::kProtectedBit | 0x7Fu));
+        static_assert(sizeof(Cell) == 8 && offsetof(Cell, style) == 4 && std::endian::native == std::endian::little);
+        const uint64_t key = uint64_t(sid) << 32;
+        for (; j < n; ++j) {
+            // Four plain cells at a time: the bulk of text rows.
+            while (j + 4 <= n) {
+                uint64_t w4[4];
+                std::memcpy(w4, cells + j, sizeof w4);
+                if ((((w4[0] & kPlainMask) ^ key) | ((w4[1] & kPlainMask) ^ key) | ((w4[2] & kPlainMask) ^ key) |
+                     ((w4[3] & kPlainMask) ^ key)) != 0)
+                    break;
+                p[0] = char(w4[0] & 0x7F);
+                p[1] = char(w4[1] & 0x7F);
+                p[2] = char(w4[2] & 0x7F);
+                p[3] = char(w4[3] & 0x7F);
+                p += 4;
+                j += 4;
+                columns += 4;
+            }
+            if (j >= n) break;
+            const Cell& c = cells[j];
             const uint32_t plain = c.bits & ~Cell::kProtectedBit;
             if (plain < 0x80) {  // narrow, no cluster, ASCII or empty: one byte
+                if (c.style != sid) break;
                 *p++ = char(plain);
+                ++columns;
                 continue;
             }
             const Wide w = c.wide();
-            if (w == Wide::SpacerHead || w == Wide::SpacerTail) continue;
+            if (w == Wide::SpacerHead || w == Wide::SpacerTail) continue;  // never end a run
+            if (c.style != sid) break;
+            if (w == Wide::Narrow) {
+                ++columns;
+            } else {
+                stats.has_wide = true;
+                columns += (j + 1 < n && cells[j + 1].wide() == Wide::SpacerTail) ? 2 : 1;
+            }
             if (c.is_empty()) {
                 *p++ = '\0';
                 continue;
             }
             std::u32string_view tail;
-            if (c.has_cluster()) tail = cluster_at(k);
+            if (c.has_cluster()) tail = cluster_at(j);
             if (!tail.empty()) {
-                size_t need = 1 + 10 + 5 + 4 * tail.size() + 5 * (j - k);
+                size_t need = 1 + 10 + 5 + 4 * tail.size() + 5 * (n - j);
                 if (size_t(limit - p) < need) {
-                    size_t used = size_t(p - out.data());
-                    out.resize(used + need);
-                    p = out.data() + used;
-                    limit = out.data() + out.size();
+                    out.set_end(p);
+                    p = out.reserve(need);
+                    limit = p + need;
                 }
                 *p++ = '\x02';
                 p = put_varint(p, tail.size());
             }
-            if (w == Wide::Lead && k + 1 < n && cells[k + 1].wide() == Wide::SpacerTail) *p++ = '\x01';
+            if (w == Wide::Lead && j + 1 < n && cells[j + 1].wide() == Wide::SpacerTail) *p++ = '\x01';
             p = put_utf8(p, c.cp());
             for (char32_t t : tail) p = put_utf8(p, t);
         }
-        out.resize(size_t(p - out.data()));
+        stats.columns += columns;
+        char head[10];
+        const size_t hl = size_t(put_varint(head, (columns << 1) | (has_style ? 1u : 0u)) - head);
+        out.set_end(p);
+        char* base = out.mdata() + hdr;
+        const size_t body = size_t(p - (base + kHeaderSlot));
+        if (hl > kHeaderSlot) {  // a run of 2^27+ columns: make room instead
+            out.reserve(hl - kHeaderSlot);
+            base = out.mdata() + hdr;
+            std::memmove(base + hl, base + kHeaderSlot, body);
+        } else if (hl < kHeaderSlot) {
+            std::memmove(base + hl, base + kHeaderSlot, body);
+        }
+        std::memcpy(base, head, hl);
+        out.set_end(base + hl + body);
         i = j;
     }
     return stats;

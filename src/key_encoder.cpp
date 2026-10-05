@@ -180,6 +180,10 @@ KeyboardModes KeyboardModes::from(const Terminal& t) noexcept {
     k.app_keypad = m.app_keypad;
     k.backarrow_sends_bs = m.backarrow_sends_bs;
     k.modify_other_keys = m.modify_other_keys;
+    k.modify_cursor_keys = m.modify_cursor_keys;
+    k.modify_function_keys = m.modify_function_keys;
+    k.modify_keypad_keys = m.modify_keypad_keys;
+    k.format_other_keys = m.format_other_keys;
     k.alt_sends_escape = m.alt_sends_escape;
     k.meta_sends_escape = m.meta_sends_escape;
     return k;

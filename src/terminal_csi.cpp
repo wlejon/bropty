@@ -74,6 +74,8 @@ void Terminal::csi_dispatch(const CsiSeq& s) {
     case key('?', 0, 'l'):
         for (int i = 0; i < s.count; ++i) set_private_mode(s.raw(i, 0), s.final == 'h');
         break;
+    case key('?', 0, 's'): save_private_modes(s); break;     // XTSAVE
+    case key('?', 0, 'r'): restore_private_modes(s); break;  // XTRESTORE
     case key(0, 0, 'm'): sgr(s); break;
     case key(0, 0, 'n'):
     case key('?', 0, 'n'): device_status(s); break;
@@ -93,6 +95,8 @@ void Terminal::csi_dispatch(const CsiSeq& s) {
     case key('>', 0, 'm'):  // XTMODKEYS
     case key('>', 0, 'n'):  // XTMODKEYS disable
     case key('?', 0, 'm'): xterm_modkeys(s); break;  // XTQMODKEYS
+    case key('>', 0, 'f'):  // XTFMTKEYS
+    case key('?', 0, 'f'): xterm_fmtkeys(s); break;  // XTQFMTKEYS
     case key('>', 0, 'q'):
         if (s.raw(0, 0) == 0) reply(std::string("\x1bP>|bropty(") + std::string(version_string()) + ")\x1b\\");
         break;
@@ -354,28 +358,92 @@ void Terminal::kitty_keyboard(const CsiSeq& s) {
     }
 }
 
-// XTMODKEYS (CSI > Pp ; Pv m, CSI > Pp n) and XTQMODKEYS (CSI ? Pp m). Only
-// modifyOtherKeys (Pp = 4) affects bropty's encoding; the other resources keep
-// xterm's defaults. Omitting Pv (or all parameters) resets to the initial 0.
+namespace {
+// The XTMODKEYS resource Pp, or null for an unknown one.
+int* modkey_resource(Modes& m, int pp) {
+    switch (pp) {
+    case 0: return &m.modify_keyboard;
+    case 1: return &m.modify_cursor_keys;
+    case 2: return &m.modify_function_keys;
+    case 3: return &m.modify_keypad_keys;
+    case 4: return &m.modify_other_keys;
+    case 6: return &m.modify_modifier_keys;
+    case 7: return &m.modify_special_keys;
+    default: return nullptr;
+    }
+}
+// Highest value each resource accepts (xterm ignores a value out of range).
+int modkey_max(int pp) {
+    switch (pp) {
+    case 0: return 15;  // modifyKeyboard is a bit mask
+    case 4: return 3;
+    case 6: return 3;
+    case 7: return 1;
+    default: return 3;
+    }
+}
+} // namespace
+
+void Terminal::reset_modkeys() {
+    const Modes initial;
+    modes_.modify_keyboard = initial.modify_keyboard;
+    modes_.modify_cursor_keys = initial.modify_cursor_keys;
+    modes_.modify_function_keys = initial.modify_function_keys;
+    modes_.modify_keypad_keys = initial.modify_keypad_keys;
+    modes_.modify_other_keys = initial.modify_other_keys;
+    modes_.modify_modifier_keys = initial.modify_modifier_keys;
+    modes_.modify_special_keys = initial.modify_special_keys;
+    modes_.format_other_keys = initial.format_other_keys;
+}
+
+// XTMODKEYS (CSI > Pp ; Pv m), its disable form (CSI > Pp n, Pp omitted = 2,
+// value -1) and XTQMODKEYS (CSI ? Pp m), following xterm's set_mod_fkeys():
+// omitting Pv resets the resource to its initial value, omitting every
+// parameter resets them all.
 void Terminal::xterm_modkeys(const CsiSeq& s) {
     if (s.has_subparams()) return;
+    Modes initial;
     if (s.prefix == '?') {
         for (int i = 0; i < s.count; ++i) {
-            if (s.raw(i, -1) == 4) reply("\x1b[>4;" + num(modes_.modify_other_keys) + "m");
+            const int pp = s.raw(i, -1);
+            if (const int* r = modkey_resource(modes_, pp)) reply("\x1b[>" + num(pp) + ";" + num(*r) + "m");
         }
         return;
     }
     if (s.final == 'n') {
-        if (s.raw(0, -1) == 4) modes_.modify_other_keys = 0;
+        if (int* r = modkey_resource(modes_, s.raw(0, 2))) *r = -1;
         return;
     }
     if (s.count == 0) {
-        modes_.modify_other_keys = 0;
+        const int fmt = modes_.format_other_keys;  // XTFMTKEYS is a separate resource
+        reset_modkeys();
+        modes_.format_other_keys = fmt;
+        return;
+    }
+    const int pp = s.raw(0, -1);
+    int* r = modkey_resource(modes_, pp);
+    if (!r) return;
+    const int v = s.raw(1, -2);
+    if (v == -2) {
+        *r = *modkey_resource(initial, pp);
+    } else if (v >= 0 && v <= modkey_max(pp)) {
+        *r = v;
+    }
+}
+
+// XTFMTKEYS (CSI > 4 ; Pv f) and its query XTQFMTKEYS (CSI ? 4 f): only
+// formatOtherKeys (Pp 4) exists; omitting Pv resets it to 0.
+void Terminal::xterm_fmtkeys(const CsiSeq& s) {
+    if (s.has_subparams()) return;
+    if (s.prefix == '?') {
+        for (int i = 0; i < s.count; ++i) {
+            if (s.raw(i, -1) == 4) reply("\x1b[>4;" + num(modes_.format_other_keys) + "f");
+        }
         return;
     }
     if (s.raw(0, -1) != 4) return;
-    int v = s.raw(1, 0);
-    modes_.modify_other_keys = std::clamp(v, 0, 3);
+    const int v = s.raw(1, 0);
+    if (v == 0 || v == 1) modes_.format_other_keys = v;
 }
 
 void Terminal::window_op(const CsiSeq& s) {
@@ -440,7 +508,7 @@ void Terminal::soft_reset() {
     modes_.autowrap = true;
     modes_.app_keypad = false;
     modes_.app_cursor_keys = false;
-    modes_.modify_other_keys = 0;  // xterm's ReallyReset restores the modifier resources on DECSTR too
+    reset_modkeys();  // xterm's ReallyReset restores the modifier resources on DECSTR too
     reset_margins();
     c.cs = Charsets{};
     c.pen = Style{};
@@ -504,16 +572,30 @@ void Terminal::rect_op(const CsiSeq& s, RectOp op) {
         if (dt >= rows_ || dl >= cols_) return;
         int h = std::min(b - t + 1, rows_ - dt);
         int w = std::min(r - l + 1, cols_ - dl);
+        // Snapshot the source (cells and cluster tails) first: the areas may overlap.
         std::vector<Cell> tmp(size_t(h) * size_t(w));
-        for (int y = 0; y < h; ++y)
-            for (int x = 0; x < w; ++x) tmp[size_t(y * w + x)] = g.at(t + y, l + x);
+        std::vector<std::pair<int, std::u32string>> tails;  // (y * w + x, tail)
         for (int y = 0; y < h; ++y) {
+            const ClusterMap* m = g.clusters(t + y);
+            for (int x = 0; x < w; ++x) {
+                const Cell& cell = g.at(t + y, l + x);
+                tmp[size_t(y * w + x)] = cell;
+                if (cell.has_cluster() && m) {
+                    std::u32string_view tail = m->find(l + x);
+                    if (!tail.empty()) tails.emplace_back(y * w + x, std::u32string(tail));
+                }
+            }
+        }
+        size_t ti = 0;
+        for (int y = 0; y < h; ++y) {
+            if (const ClusterMap* m = g.clusters(dt + y); m && !m->empty()) g.clusters_mut(dt + y).erase_range(dl, dl + w);
             for (int x = 0; x < w; ++x) {
                 Cell cell = tmp[size_t(y * w + x)];
-                cell.set_cluster(false);  // cluster tails are not carried by DECCRA
+                const bool has_tail = ti < tails.size() && tails[ti].first == y * w + x;
+                cell.set_cluster(has_tail);
                 g.at(dt + y, dl + x) = cell;
+                if (has_tail) g.clusters_mut(dt + y).set(dl + x, tails[ti++].second);
             }
-            if (const ClusterMap* m = g.clusters(dt + y); m && !m->empty()) g.clusters_mut(dt + y).erase_range(dl, dl + w);
             sanitize_row(dt + y, dl, dl + w);
             g.mark_dirty(dt + y);
         }

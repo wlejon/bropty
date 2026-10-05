@@ -49,7 +49,9 @@ public:
 
     const std::string& last_error() const override { return error_; }
     size_t write(std::string_view data) override;
+    size_t write_some(std::string_view data) override;
     size_t pending_input() const override;
+    size_t input_space() const override;
     size_t read(void* dst, size_t max_bytes) override { return ring_->read(dst, max_bytes); }
     size_t read_timeout(void* dst, size_t max_bytes, std::chrono::milliseconds timeout) override {
         return ring_->read_timeout(dst, max_bytes, timeout);
@@ -98,10 +100,17 @@ protected:
     std::function<void()> wakeup_;
 
 private:
+    size_t enqueue(std::string_view data, bool partial);
+
     mutable std::mutex in_mu_;
     std::condition_variable in_cv_;
     std::string in_buf_;
+    size_t in_head_{0};  // consumed prefix of in_buf_ (compacted lazily)
     bool in_stopped_{false};
+    bool in_refused_{false};  // a write was cut short: wake the host when room returns
 };
+
+// Test seam (pty_detail::set_test_suppress_kill).
+bool test_suppress_kill();
 
 } // namespace bropty::pty_detail

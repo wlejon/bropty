@@ -19,6 +19,7 @@ bropty_test(test_replies)
 bropty_test(test_reflow)
 bropty_test(test_scrollback)
 bropty_test(test_ring_buffer)
+bropty_test(test_xterm_modes)
 
 # Input encoding: kitty keyboard protocol, xterm legacy keys + modifyOtherKeys,
 # mouse, paste / focus, and the Session wiring that picks them by mode.
@@ -38,8 +39,10 @@ endif()
 add_executable(pty_child pty_child.cpp)
 bropty_test(test_pty ARGS $<TARGET_FILE:pty_child>)
 bropty_test(test_pty_teardown ARGS $<TARGET_FILE:pty_child>)
+bropty_test(test_pty_lifecycle ARGS $<TARGET_FILE:pty_child>)
 add_dependencies(test_pty pty_child)
 add_dependencies(test_pty_teardown pty_child)
+add_dependencies(test_pty_lifecycle pty_child)
 
 # Unicode tables + UAX #29 segmentation against the official conformance file.
 bropty_test(test_unicode ARGS ${CMAKE_CURRENT_SOURCE_DIR}/data/GraphemeBreakTest.txt)

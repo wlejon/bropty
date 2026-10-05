@@ -12,8 +12,12 @@
 //  - Synchronous ReadFile / WriteFile on pipes do not return when the handle
 //    is closed from another thread: blocked I/O is cancelled with
 //    CancelSynchronousIo until the thread has left.
-//  - A child that ignores CTRL_CLOSE_EVENT is killed with TerminateProcess
-//    after PtyConfig::terminate_grace.
+//  - A child that ignores CTRL_CLOSE_EVENT is killed after
+//    PtyConfig::terminate_grace. Under ProcessTree::Tree the child is created
+//    inside a kill-on-close job object, so the kill takes the whole tree --
+//    including grandchildren that detached from the console (DETACHED_PROCESS,
+//    FreeConsole, GUI programs) -- except those created with
+//    CREATE_BREAKAWAY_FROM_JOB, the explicit opt-out the job allows.
 #if defined(_WIN32)
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -134,6 +138,7 @@ private:
     std::mutex console_mu_;
     HPCON hpc_{nullptr};
     Handle process_;
+    Handle job_;  // ProcessTree::Tree
     Handle in_write_;
     Handle out_read_;
     Handle stop_event_;
@@ -157,11 +162,27 @@ bool PtyWin::spawn(const PtyConfig& config) {
         return fail(system_error("CreatePseudoConsole", DWORD(hr)));
     }
 
+    // The process tree lives in a job: kill-on-close (a crashed host leaks
+    // nothing), breakaway permitted only to processes that ask for it.
+    if (config.process_tree == PtyConfig::ProcessTree::Tree) {
+        job_.reset(CreateJobObjectW(nullptr, nullptr));
+        if (!job_) {
+            close_console();
+            return fail(system_error("CreateJobObject"));
+        }
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION lim{};
+        lim.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+        if (!SetInformationJobObject(job_.h, JobObjectExtendedLimitInformation, &lim, sizeof lim)) {
+            close_console();
+            return fail(system_error("SetInformationJobObject"));
+        }
+    }
+    const DWORD nattrs = job_ ? 2 : 1;
     SIZE_T attr_bytes = 0;
-    InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_bytes);
+    InitializeProcThreadAttributeList(nullptr, nattrs, 0, &attr_bytes);
     std::vector<unsigned char> attr_storage(attr_bytes);
     auto* attrs = reinterpret_cast<PPROC_THREAD_ATTRIBUTE_LIST>(attr_storage.data());
-    if (!InitializeProcThreadAttributeList(attrs, 1, 0, &attr_bytes)) {
+    if (!InitializeProcThreadAttributeList(attrs, nattrs, 0, &attr_bytes)) {
         close_console();
         return fail(system_error("InitializeProcThreadAttributeList"));
     }
@@ -170,6 +191,15 @@ bool PtyWin::spawn(const PtyConfig& config) {
         DeleteProcThreadAttributeList(attrs);
         close_console();
         return fail(system_error("UpdateProcThreadAttribute"));
+    }
+    // Created inside the job, so not even its first instruction runs outside
+    // (no window in which it could spawn something the job misses).
+    HANDLE job_list[1] = {job_.h};
+    if (job_ && !UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, job_list, sizeof job_list,
+                                           nullptr, nullptr)) {
+        DeleteProcThreadAttributeList(attrs);
+        close_console();
+        return fail(system_error("UpdateProcThreadAttribute(JOB_LIST)"));
     }
 
     STARTUPINFOEXW si{};
@@ -287,10 +317,15 @@ void PtyWin::terminate() {
         ring_->close();  // from here on output is drained and dropped
         stop_input();
         close_console();  // CTRL_CLOSE_EVENT to the console's clients
-        if (!exit_->wait_for(config_.terminate_grace)) {
-            TerminateProcess(process_.h, 1);
+        const bool may_kill = !pty_detail::test_suppress_kill();
+        if (!exit_->wait_for(config_.terminate_grace) && may_kill) {
+            if (job_) TerminateJobObject(job_.h, 1);
+            else TerminateProcess(process_.h, 1);
             WaitForSingleObject(process_.h, 5000);
         }
+        // The rest of the tree: whatever the child started that is still in
+        // the job (detached from the console or not) goes with the session.
+        if (job_ && may_kill) TerminateJobObject(job_.h, 1);
         SetEvent(stop_event_.h);
         if (waiter_.joinable()) waiter_.join();
         if (!exit_->done()) {
@@ -302,8 +337,13 @@ void PtyWin::terminate() {
         output_done_ = true;
         in_write_.reset();
         out_read_.reset();
+        if (may_kill) job_.reset();  // (kill-on-close; kept open under the test seam)
     });
 }
+
+namespace pty_detail {
+size_t orphans_pending() { return 0; }
+} // namespace pty_detail
 
 std::unique_ptr<IPtyProcess> create_pty_win() { return std::make_unique<PtyWin>(); }
 

@@ -27,11 +27,7 @@ inline uint16_t props(char32_t cp) noexcept {
     return kProps[kStage2[(static_cast<unsigned>(kStage1[cp >> kShift]) << kShift) | (cp & kMask)]];
 }
 
-inline int width_of(uint16_t p, bool ambiguous_wide) noexcept {
-    unsigned w = p & kWidthMask;
-    if (w == kWidthAmbiguous) return ambiguous_wide ? 2 : 1;
-    return static_cast<int>(w);
-}
+static_assert(kWidthMask == 0x3 && kWidthAmbiguous == 3, "unicode::width_of() in unicode.h decodes this layout");
 
 inline GraphemeBreak gcb_of(uint16_t p) noexcept {
     return static_cast<GraphemeBreak>((p >> kGcbShift) & kGcbMask);
@@ -42,6 +38,8 @@ inline IndicConjunctBreak incb_of(uint16_t p) noexcept {
 }
 
 } // namespace
+
+Props properties(char32_t cp) noexcept { return props(cp); }
 
 int width(char32_t cp, bool ambiguous_wide) noexcept {
     // ASCII fast path: printable ASCII is always 1; the parser handles the rest itself.
@@ -64,11 +62,14 @@ GraphemeBreak grapheme_break(char32_t cp) noexcept { return gcb_of(props(cp)); }
 
 IndicConjunctBreak indic_conjunct_break(char32_t cp) noexcept { return incb_of(props(cp)); }
 
-bool GraphemeSegmenter::next(char32_t cp) noexcept {
+bool GraphemeSegmenter::next_props(Props p) noexcept {
     using G = GraphemeBreak;
     using I = IndicConjunctBreak;
-    const uint16_t p = props(cp);
     const G cur = gcb_of(p);
+    // The common case -- Other after Other, nothing pending -- breaks (GB999)
+    // and leaves every state at rest.
+    if (prev_ == static_cast<uint8_t>(G::Other) && (p & 0x3FCu) == 0 && (emoji_ | incb_ | ri_odd_) == 0)
+        return true;
     const I incb = incb_of(p);
     const bool ext_pict = (p & kExtPictBit) != 0;
 

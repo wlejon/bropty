@@ -6,6 +6,23 @@
 //
 // Embedder events (bell, title, clipboard, ...) are forwarded to an optional
 // delegate TerminalHost.
+//
+// Input backpressure. The pty's input queue is bounded
+// (PtyConfig::input_buffer_bytes); when a child stops reading, input is
+// refused rather than buffered without limit, and the host can see it:
+//  * Key, text, mouse and focus events are all-or-nothing: send_*() returns
+//    false when the event could not be queued (the child is not reading; it
+//    is dropped, as a full tty input queue drops keystrokes).
+//  * A paste larger than the free space is accepted and finished in the
+//    background: what does not fit waits in the Session's outbox and update()
+//    feeds it to the pty as the child reads. While it is pending,
+//    input_blocked() is true and further input events and pastes are refused
+//    (they would otherwise land inside the bracketed paste).
+//  * Replies the terminal generates (DA, DSR, OSC queries) queue behind a
+//    pending paste; at most kMaxReplyBacklog bytes of them, beyond which an
+//    application flooding queries without reading their answers loses them.
+// The pty's wakeup hook fires when a full queue drains, so a host that saw
+// input_blocked() needs no polling to call update() again.
 
 #include "bropty/input.h"
 #include "bropty/pty.h"
@@ -14,6 +31,7 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <string>
 #include <string_view>
 
 namespace bropty {
@@ -21,6 +39,7 @@ namespace bropty {
 class Session final : public TerminalHost {
 public:
     using OutputCallback = std::function<void(std::string_view)>;
+    static constexpr size_t kMaxReplyBacklog = 64u << 10;
 
     Session();
     explicit Session(const TerminalOptions& options);
@@ -32,7 +51,8 @@ public:
     void attach_pty(std::shared_ptr<IPtyProcess> pty);
     [[nodiscard]] const std::shared_ptr<IPtyProcess>& pty() const noexcept { return pty_; }
     void set_delegate(TerminalHost* host) noexcept { delegate_ = host; }
-    // Observe (and, without a PTY, capture) every byte sent to the application.
+    // Observe (and, without a PTY, capture) every byte sent to the
+    // application, at the moment the Session accepts it.
     void set_output_callback(OutputCallback cb) { output_cb_ = std::move(cb); }
 
     // Feed pending PTY output into the terminal, bounded so that a fast
@@ -42,7 +62,7 @@ public:
     // bounded buffer, which in turn stops reading from the child: the
     // producer is throttled to the rate the host consumes. Returns the bytes
     // processed; has_pending_output() says whether to come back sooner than
-    // the next wakeup.
+    // the next wakeup. update() also moves a pending paste on (see above).
     struct UpdateBudget {
         size_t max_bytes{16u << 20};
         std::chrono::microseconds max_time{4000};
@@ -55,7 +75,7 @@ public:
     void feed(std::string_view bytes) { term_.feed(bytes); }
 
     // ---- input (input.h), encoded for the terminal's current modes and
-    // written to the application. Each returns whether anything was sent.
+    // written to the application. Each returns whether it was accepted.
     bool send_key(const KeyEvent& ev);
     // Typed text with no key behind it (an IME commit). Control characters are
     // dropped; under kitty flags 8+16 it is reported as CSI 0;;text u.
@@ -69,7 +89,18 @@ public:
     bool send_mouse(const MouseEvent& ev);
     // Focus in / out report, only when ?1004 is set.
     bool focus(bool focused);
+
+    // Input not yet accepted by the pty (a paste in progress, replies behind it).
+    [[nodiscard]] size_t pending_input_bytes() const noexcept { return outbox_.size() - outbox_head_; }
+    // True while a paste is still being delivered: input events are refused.
+    [[nodiscard]] bool input_blocked() const noexcept { return pending_input_bytes() > 0; }
+
+    // Resize the terminal and the pty. The pty's pixel size (TIOCSWINSZ
+    // ws_xpixel / ws_ypixel, which programs drawing sixel or kitty graphics
+    // read) is the grid times the cell size from set_cell_pixel_size().
     void resize(int cols, int rows);
+    // Cell size in pixels: answers XTWINOPS 14/16 and is passed to the pty.
+    void set_cell_pixel_size(int width, int height);
 
     // TerminalHost
     void write_to_pty(std::string_view bytes) override;
@@ -84,14 +115,22 @@ public:
     void semantic_mark(char kind, std::string_view params) override;
     void palette_changed() override;
     void apc(std::string_view payload) override;
+    void resized_by_application(int cols, int rows) override;
 
 private:
+    bool send_event(const std::string& bytes);  // all-or-nothing input event
+    void flush_outbox();
+    void push_size();
+
     Terminal term_;
     std::shared_ptr<IPtyProcess> pty_;
     TerminalHost* delegate_{nullptr};
     OutputCallback output_cb_;
     std::unique_ptr<char[]> read_buf_;
     MouseReporter mouse_;
+    std::string outbox_;      // accepted, not yet taken by the pty, in order
+    size_t outbox_head_{0};   // bytes of outbox_ already handed to the pty
+    size_t reply_backlog_{0}; // reply bytes queued behind a paste
 };
 
 } // namespace bropty

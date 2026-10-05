@@ -15,6 +15,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <memory>
 #include <string>
@@ -25,6 +26,34 @@ namespace bropty {
 
 namespace detail {
 struct LogicalLine;
+
+// A growable byte buffer that, unlike std::string::resize, does not zero the
+// space it grows into (the line encoder reserves worst-case room per run).
+class ByteBuf {
+public:
+    [[nodiscard]] const char* data() const noexcept { return p_.get(); }
+    [[nodiscard]] char* mdata() noexcept { return p_.get(); }
+    [[nodiscard]] size_t size() const noexcept { return n_; }
+    void clear() noexcept { n_ = 0; }
+    // Room for `extra` more bytes; returns where they go. Commit with set_end().
+    char* reserve(size_t extra) {
+        if (n_ + extra > cap_) {
+            size_t cap = cap_ ? cap_ : 256;
+            while (cap < n_ + extra) cap *= 2;
+            std::unique_ptr<char[]> q(new char[cap]);
+            if (n_) std::memcpy(q.get(), p_.get(), n_);
+            p_ = std::move(q);
+            cap_ = cap;
+        }
+        return p_.get() + n_;
+    }
+    void set_end(const char* end) noexcept { n_ = size_t(end - p_.get()); }
+
+private:
+    std::unique_ptr<char[]> p_;
+    size_t n_{0};
+    size_t cap_{0};
+};
 
 // A growable circular buffer: deque operations without a heap allocation per
 // element (MSVC's std::deque stores one 40-byte record per block).
@@ -144,7 +173,7 @@ private:
     static constexpr uint32_t kNextWide = 1u << 28;
     static constexpr size_t kBlockSize = 64 * 1024;
 
-    void append_bytes(Rec& rec, const std::string& bytes, bool new_line);
+    void append_bytes(Rec& rec, const detail::ByteBuf& bytes, bool new_line);
     uint32_t rows_for(const Rec& rec) const;
     void decode_rec(const Rec& rec, detail::LogicalLine& out, std::vector<Style>& palette) const;
     void pop_front();
@@ -160,7 +189,7 @@ private:
     uint64_t block_base_{0};  // sequence number of blocks_.front()
     uint64_t next_seq_{0};
     size_t total_rows_{0};
-    std::string scratch_;
+    detail::ByteBuf scratch_;
 
     mutable std::unordered_map<uint64_t, Decoded> cache_;
 };

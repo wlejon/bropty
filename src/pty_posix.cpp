@@ -8,16 +8,20 @@
 // program instead of leaving a child that printed nothing and exited 127.
 //
 // Threads: a reader (master -> ring, poll()ing a wake pipe too), a writer
-// (input queue -> non-blocking master) and a waiter that alone reaps the
-// child with a blocking waitpid() -- so is_running()/exit_code() never reap,
-// and the status is never lost.
+// (input queue -> non-blocking master) and a waiter that alone observes the
+// child's exit (pty_posix_child.h: through a supervisor on Linux, a kqueue on
+// macOS) -- so is_running()/exit_code() never reap, and a host reaping
+// children of its own cannot take the status.
 //
 // Teardown: SIGHUP to the child's process group (it is a session leader),
 // then SIGTERM, then SIGKILL, each after PtyConfig::terminate_grace; the
-// wake pipe unblocks the reader and writer whatever the child is doing.
+// wake pipe unblocks the reader, writer and waiter whatever the child is
+// doing, so all three are joined. A child that survives SIGKILL (stuck in
+// uninterruptible sleep) goes to the process-wide reaper.
 #if !defined(_WIN32)
 
 #include "pty_base.h"
+#include "pty_posix_child.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -138,6 +142,48 @@ const char* step_name(int s) {
     _exit(127);
 }
 
+// Everything the child needs, prepared by the parent.
+struct ChildArgs {
+    const char* program;
+    char* const* argv;
+    char* const* envp;
+    const char* cwd;
+    int slave;
+    int errpipe;
+    int max_fd;
+};
+
+// The child, between fork and exec: async-signal-safe calls only.
+[[noreturn]] void child_main(void* p) {
+    const ChildArgs& a = *static_cast<const ChildArgs*>(p);
+    for (int s = 1; s < NSIG; ++s) {
+        struct sigaction sa {};
+        sa.sa_handler = SIG_DFL;
+        sigaction(s, &sa, nullptr);  // fails harmlessly for SIGKILL/SIGSTOP/invalid
+    }
+    if (setsid() < 0) child_fail(a.errpipe, Step_Setsid);
+    if (ioctl(a.slave, TIOCSCTTY, 0) < 0) child_fail(a.errpipe, Step_Ctty);
+    if (dup2(a.slave, 0) < 0 || dup2(a.slave, 1) < 0 || dup2(a.slave, 2) < 0) child_fail(a.errpipe, Step_Dup);
+    // Nothing else of the host's leaks into the child (errpipe is already
+    // close-on-exec; marking rather than closing keeps it usable here).
+    bool marked = false;
+#if defined(__linux__) && defined(SYS_close_range)
+    marked = syscall(SYS_close_range, 3u, ~0u, 4u /* CLOSE_RANGE_CLOEXEC */) == 0;
+#endif
+    if (!marked) {
+        for (int fd = 3; fd < a.max_fd; ++fd) {
+            int f = fcntl(fd, F_GETFD);
+            if (f >= 0 && !(f & FD_CLOEXEC)) fcntl(fd, F_SETFD, f | FD_CLOEXEC);
+        }
+    }
+    if (a.cwd && chdir(a.cwd) != 0) child_fail(a.errpipe, Step_Chdir);
+    sigset_t none;
+    sigemptyset(&none);
+    sigprocmask(SIG_SETMASK, &none, nullptr);
+    execve(a.program, a.argv, a.envp);
+    child_fail(a.errpipe, Step_Exec);
+}
+
 } // namespace
 
 class PtyPosix final : public pty_detail::PtyBase {
@@ -158,6 +204,7 @@ private:
     int master_{-1};
     int wake_[2]{-1, -1};
     pid_t pid_{-1};
+    pty_detail::ChildProc child_;
     std::thread reader_, writer_, waiter_;
     std::once_flag teardown_;
 };
@@ -255,36 +302,8 @@ bool PtyPosix::spawn(const PtyConfig& config) {
     // Block signals across fork so no host handler runs in the child before
     // dispositions are reset.
     pthread_sigmask(SIG_SETMASK, &all, &old);
-    pid_t pid = fork();
-    if (pid == 0) {
-        // ---- child: async-signal-safe calls only
-        for (int s = 1; s < NSIG; ++s) {
-            struct sigaction sa {};
-            sa.sa_handler = SIG_DFL;
-            sigaction(s, &sa, nullptr);  // fails harmlessly for SIGKILL/SIGSTOP/invalid
-        }
-        if (setsid() < 0) child_fail(errpipe[1], Step_Setsid);
-        if (ioctl(slave, TIOCSCTTY, 0) < 0) child_fail(errpipe[1], Step_Ctty);
-        if (dup2(slave, 0) < 0 || dup2(slave, 1) < 0 || dup2(slave, 2) < 0) child_fail(errpipe[1], Step_Dup);
-        // Nothing else of the host's leaks into the child (errpipe is already
-        // close-on-exec; marking rather than closing keeps it usable here).
-        bool marked = false;
-#if defined(__linux__) && defined(SYS_close_range)
-        marked = syscall(SYS_close_range, 3u, ~0u, 4u /* CLOSE_RANGE_CLOEXEC */) == 0;
-#endif
-        if (!marked) {
-            for (int fd = 3; fd < max_fd; ++fd) {
-                int f = fcntl(fd, F_GETFD);
-                if (f >= 0 && !(f & FD_CLOEXEC)) fcntl(fd, F_SETFD, f | FD_CLOEXEC);
-            }
-        }
-        if (cwd && chdir(cwd) != 0) child_fail(errpipe[1], Step_Chdir);
-        sigset_t none;
-        sigemptyset(&none);
-        sigprocmask(SIG_SETMASK, &none, nullptr);
-        execve(program.c_str(), argv.data(), envp.data());
-        child_fail(errpipe[1], Step_Exec);
-    }
+    ChildArgs args{program.c_str(), argv.data(), envp.data(), cwd, slave, errpipe[1], max_fd};
+    pid_t pid = pty_detail::spawn_child(child_, &child_main, &args);
     int fork_errno = errno;
     pthread_sigmask(SIG_SETMASK, &old, nullptr);
     ::close(slave);
@@ -304,9 +323,7 @@ bool PtyPosix::spawn(const PtyConfig& config) {
     } while (got < 0 && errno == EINTR);
     ::close(errpipe[0]);
     if (got == ssize_t(sizeof ce)) {
-        int status = 0;
-        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
-        }
+        pty_detail::reap_blocking(child_);
         close_fd(master_);
         close_fd(wake_[0]);
         close_fd(wake_[1]);
@@ -318,20 +335,9 @@ bool PtyPosix::spawn(const PtyConfig& config) {
     spawned_ = true;
     reader_ = std::thread(&PtyPosix::reader_main, this);
     writer_ = std::thread(&PtyPosix::writer_main, this);
-    // The waiter shares only the exit state, so it may outlive *this.
-    waiter_ = std::thread([pid, st = exit_, wake = wakeup_] {
-        int status = 0;
-        pid_t r;
-        do {
-            r = waitpid(pid, &status, 0);
-        } while (r < 0 && errno == EINTR);
-        int code = -1;
-        if (r == pid) {
-            if (WIFEXITED(status)) code = WEXITSTATUS(status);
-            else if (WIFSIGNALED(status)) code = 128 + WTERMSIG(status);
-        }
-        st->set(code);
-        if (wake) wake();
+    // Woken through wake_ at teardown, so it is always joined.
+    waiter_ = std::thread([this] {
+        if (pty_detail::wait_exit(child_, wake_[0], *exit_)) notify();
     });
     return true;
 }
@@ -391,6 +397,7 @@ bool PtyPosix::resize(const PtySize& size) {
 
 bool PtyPosix::signal_and_wait(int sig, std::chrono::milliseconds grace) {
     if (exit_->done()) return true;
+    if (pty_detail::test_suppress_kill()) return exit_->wait_for(grace);
     // The child leads its own session and process group; signal the group so
     // jobs it started go too, and the child itself in case it moved groups.
     ::kill(-pid_, sig);
@@ -403,17 +410,20 @@ void PtyPosix::terminate() {
     std::call_once(teardown_, [this] {
         ring_->close();  // unblock a reader waiting for ring space; drop further output
         stop_input();
+        // SIGKILL normally takes effect at once; a child still there after
+        // the last wait is stuck in the kernel and is left to the reaper.
         if (!signal_and_wait(SIGHUP, config_.terminate_grace) && !signal_and_wait(SIGTERM, config_.terminate_grace))
-            signal_and_wait(SIGKILL, std::chrono::seconds(5));
+            signal_and_wait(SIGKILL, std::max<std::chrono::milliseconds>(config_.terminate_grace,
+                                                                         std::chrono::milliseconds(2000)));
         char b = 1;
         ssize_t r = ::write(wake_[1], &b, 1);
         (void)r;
         if (reader_.joinable()) reader_.join();
         if (writer_.joinable()) writer_.join();
-        // Only an unkillable (uninterruptible-sleep) child leaves the waiter
-        // blocked; it shares nothing with *this but the exit state.
-        if (exit_->done()) waiter_.join();
-        else waiter_.detach();
+        if (waiter_.joinable()) waiter_.join();
+        if (exit_->done()) pty_detail::release_exited(child_);
+        else pty_detail::hand_to_reaper(child_, exit_);
+        child_ = pty_detail::ChildProc{};
         output_done_ = true;
         close_fd(master_);
         close_fd(wake_[0]);

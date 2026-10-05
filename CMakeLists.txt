@@ -28,6 +28,7 @@ set(BROPTY_SOURCES
     src/scrollback.cpp
     src/parser.cpp
     src/terminal.cpp
+    src/terminal_print.cpp
     src/terminal_csi.cpp
     src/terminal_modes.cpp
     src/terminal_osc.cpp
@@ -45,7 +46,7 @@ set(BROPTY_SOURCES
 if(WIN32)
     list(APPEND BROPTY_SOURCES src/pty_win.cpp)
 else()
-    list(APPEND BROPTY_SOURCES src/pty_posix.cpp)
+    list(APPEND BROPTY_SOURCES src/pty_posix.cpp src/pty_posix_child.cpp)
 endif()
 
 add_library(bropty STATIC ${BROPTY_SOURCES})

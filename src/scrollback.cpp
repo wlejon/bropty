@@ -25,7 +25,7 @@ const uint8_t* Scrollback::blob(const Rec& rec) const {
     return blocks_[size_t(rec.block - block_base_)].data.get() + rec.offset;
 }
 
-void Scrollback::append_bytes(Rec& rec, const std::string& bytes, bool new_line) {
+void Scrollback::append_bytes(Rec& rec, const detail::ByteBuf& bytes, bool new_line) {
     uint32_t add = uint32_t(bytes.size());
     if (new_line) {
         if (blocks_.empty() || blocks_.back().cap - blocks_.back().used < add) {

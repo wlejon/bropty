@@ -10,10 +10,16 @@ Session::Session(const TerminalOptions& options) : term_(options) { term_.set_ho
 
 Session::~Session() = default;
 
-void Session::attach_pty(std::shared_ptr<IPtyProcess> pty) { pty_ = std::move(pty); }
+void Session::attach_pty(std::shared_ptr<IPtyProcess> pty) {
+    pty_ = std::move(pty);
+    outbox_.clear();
+    outbox_head_ = 0;
+    reply_backlog_ = 0;
+}
 
 size_t Session::update(const UpdateBudget& budget) {
     if (!pty_) return 0;
+    flush_outbox();
     constexpr size_t kBuf = 64u << 10;
     if (!read_buf_) read_buf_ = std::make_unique<char[]>(kBuf);
     const size_t slice = std::clamp<size_t>(budget.slice, 256, kBuf);
@@ -29,25 +35,56 @@ size_t Session::update(const UpdateBudget& budget) {
     return total;
 }
 
-namespace {
-bool send(Session& s, const std::string& bytes) {
+void Session::flush_outbox() {
+    if (!pty_ || outbox_head_ == outbox_.size()) return;
+    outbox_head_ += pty_->write_some(std::string_view(outbox_).substr(outbox_head_));
+    if (outbox_head_ == outbox_.size()) {
+        outbox_.clear();
+        outbox_.shrink_to_fit();
+        outbox_head_ = 0;
+        reply_backlog_ = 0;
+    } else if (!pty_->is_running() && pty_->input_space() == 0) {
+        // The child is gone: nothing will ever take the rest.
+        outbox_.clear();
+        outbox_head_ = 0;
+        reply_backlog_ = 0;
+    }
+}
+
+bool Session::send_event(const std::string& bytes) {
     if (bytes.empty()) return false;
-    s.write_to_pty(bytes);
+    if (pty_) {
+        flush_outbox();
+        if (input_blocked() || pty_->write(bytes) != bytes.size()) return false;
+    }
+    if (output_cb_) output_cb_(bytes);
     return true;
 }
-} // namespace
 
-bool Session::send_key(const KeyEvent& ev) { return send(*this, encode_key(ev, KeyboardModes::from(term_))); }
+bool Session::send_key(const KeyEvent& ev) { return send_event(encode_key(ev, KeyboardModes::from(term_))); }
 
 bool Session::send_text(std::string_view text) {
     KeyEvent ev;
     ev.text = std::string(text);
-    return send(*this, encode_key(ev, KeyboardModes::from(term_)));
+    return send_event(encode_key(ev, KeyboardModes::from(term_)));
 }
 
 bool Session::paste(std::string_view text) {
     if (text.empty()) return false;
-    return send(*this, encode_paste(text, term_.modes().bracketed_paste));
+    std::string bytes = encode_paste(text, term_.modes().bracketed_paste);
+    if (bytes.empty()) return false;
+    if (pty_) {
+        flush_outbox();
+        if (input_blocked()) return false;
+        size_t n = pty_->write_some(bytes);
+        if (n == 0 && !pty_->is_running()) return false;
+        if (n < bytes.size()) {
+            outbox_.assign(bytes, n, std::string::npos);
+            outbox_head_ = 0;
+        }
+    }
+    if (output_cb_) output_cb_(bytes);
+    return true;
 }
 
 bool Session::send_mouse(const MouseEvent& ev) {
@@ -62,20 +99,44 @@ bool Session::send_mouse(const MouseEvent& ev) {
         }
         return false;
     }
-    return send(*this, mouse_.encode(ev, mm));
+    return send_event(mouse_.encode(ev, mm));
 }
 
-bool Session::focus(bool focused) { return send(*this, encode_focus(focused, term_.modes().focus_events)); }
+bool Session::focus(bool focused) { return send_event(encode_focus(focused, term_.modes().focus_events)); }
+
+void Session::push_size() {
+    if (!pty_) return;
+    PtySize s;
+    s.cols = term_.cols();
+    s.rows = term_.rows();
+    s.pixel_width = term_.cols() * std::max(0, term_.cell_pixel_width());
+    s.pixel_height = term_.rows() * std::max(0, term_.cell_pixel_height());
+    pty_->resize(s);
+}
 
 void Session::resize(int cols, int rows) {
     term_.resize(cols, rows);
-    if (pty_) pty_->resize(term_.cols(), term_.rows());
+    push_size();
 }
 
+void Session::set_cell_pixel_size(int width, int height) {
+    if (width == term_.cell_pixel_width() && height == term_.cell_pixel_height()) return;
+    term_.set_cell_pixel_size(width, height);
+    push_size();
+}
+
+// Replies from the terminal: in order behind a pending paste, bounded.
 void Session::write_to_pty(std::string_view bytes) {
     if (bytes.empty()) return;
+    if (pty_) {
+        flush_outbox();
+        if (input_blocked() || pty_->write(bytes) != bytes.size()) {
+            if (reply_backlog_ + bytes.size() > kMaxReplyBacklog) return;
+            reply_backlog_ += bytes.size();
+            outbox_.append(bytes);
+        }
+    }
     if (output_cb_) output_cb_(bytes);
-    if (pty_) pty_->write(bytes);
 }
 
 void Session::bell() { if (delegate_) delegate_->bell(); }
@@ -97,5 +158,9 @@ void Session::semantic_mark(char kind, std::string_view params) {
 }
 void Session::palette_changed() { if (delegate_) delegate_->palette_changed(); }
 void Session::apc(std::string_view payload) { if (delegate_) delegate_->apc(payload); }
+void Session::resized_by_application(int cols, int rows) {
+    push_size();
+    if (delegate_) delegate_->resized_by_application(cols, rows);
+}
 
 } // namespace bropty

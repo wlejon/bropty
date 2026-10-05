@@ -26,7 +26,11 @@
 //   ModifyOtherKeys() / allowedCharModifiers() (input.c), with the keysym being
 //   the shifted key when shift is held and XLookupString's result being the
 //   ctrl mapping above. Level 3 is treated as 2. Shift+Tab stays CSI Z except at
-//   level 2 with another modifier (CSI 27;m;9~).
+//   level 2 with another modifier (CSI 27;m;9~). formatOtherKeys 1 (XTFMTKEYS)
+//   sends every such form as CSI code;m u instead.
+// * modifyCursorKeys / modifyFunctionKeys / modifyKeypadKeys select where the
+//   modifier parameter of a modified cursor, function or application-keypad
+//   key goes (input.h lists the levels); xterm's defaults are 2, 2 and 0.
 #include "input_internal.h"
 
 namespace bropty::input_detail {
@@ -79,13 +83,24 @@ struct Legacy {
         return out;
     }
 
-    static std::string csi_letter(unsigned param, char final_char, bool ss3) {
-        if (param == 0) return std::string(ss3 ? "\x1bO" : "\x1b[") + final_char;
-        return "\x1b[1;" + num(param) + final_char;
+    // A letter-final key (SS3 x / CSI x) with xterm's modify*Keys `level`.
+    static std::string csi_letter(unsigned param, char final_char, bool ss3, int level) {
+        if (param == 0 || level < 0) return std::string(ss3 ? "\x1bO" : "\x1b[") + final_char;
+        switch (level) {
+        case 0: return std::string(ss3 ? "\x1bO" : "\x1b[") + num(param) + final_char;
+        case 1: return "\x1b[" + num(param) + final_char;
+        case 2: return "\x1b[1;" + num(param) + final_char;
+        default: return "\x1b[>1;" + num(param) + final_char;
+        }
     }
-    static std::string csi_tilde(unsigned n, unsigned param) {
-        if (param == 0) return "\x1b[" + num(n) + "~";
-        return "\x1b[" + num(n) + ";" + num(param) + "~";
+    static std::string csi_tilde(unsigned n, unsigned param, int level) {
+        if (param == 0 || level < 0) return "\x1b[" + num(n) + "~";
+        return std::string(level >= 3 ? "\x1b[>" : "\x1b[") + num(n) + ";" + num(param) + "~";
+    }
+    // The modifyOtherKeys form, per formatOtherKeys.
+    std::string other_form(unsigned mod_param, unsigned code) const {
+        if (m.format_other_keys == 1) return "\x1b[" + num(code) + ";" + num(mod_param) + "u";
+        return "\x1b[27;" + num(mod_param) + ";" + num(code) + "~";
     }
 
     enum class Kind { Text, Return, Tab, Escape, Backspace };
@@ -174,7 +189,7 @@ struct Legacy {
         case Kind::Escape: code = 27; break;
         case Kind::Backspace: code = is_delete ? 127 : 8; break;
         }
-        return "\x1b[27;" + num(fin + 1) + ";" + num(code) + "~";
+        return other_form(fin + 1, code);
     }
 
     std::string c0_key(Key key) const {
@@ -197,7 +212,7 @@ struct Legacy {
             if (shift()) {
                 unsigned st = xstate();
                 if (m.modify_other_keys >= 2 && (st & ~XS) != 0) {
-                    return "\x1b[27;" + num(st + 1) + ";9~";
+                    return other_form(st + 1, 9);
                 }
                 return alt_esc() ? std::string("\x1b\x1b[Z") : std::string("\x1b[Z");
             }
@@ -228,7 +243,7 @@ struct Legacy {
     }
 
     std::string keypad(Key key) const {
-        if (key == Key::KpBegin) return csi_letter(fparam(), 'E', m.app_cursor_keys);
+        if (key == Key::KpBegin) return csi_letter(fparam(), 'E', m.app_cursor_keys, m.modify_cursor_keys);
         if (Key nk = keypad_to_normal(key); nk != Key::None && nk != Key::Enter) return functional(nk);
         if (m.app_keypad && !(k.mods & Mod_NumLock)) {
             char f = 0;
@@ -248,8 +263,8 @@ struct Legacy {
                 default: return {};
                 }
             }
-            unsigned p = fparam();
-            return p ? "\x1bO" + num(p) + f : std::string("\x1bO") + f;
+            // xterm's modifyKeypadKeys defaults to 0: SS3 m x.
+            return csi_letter(fparam(), f, true, m.modify_keypad_keys);
         }
         // xterm writes kypd_num[] directly: no ctrl mapping, no Alt prefix.
         if (key == Key::KpEnter) return "\r";
@@ -260,30 +275,31 @@ struct Legacy {
     std::string functional(Key key) const {
         const unsigned p = fparam();
         const bool ckm = m.app_cursor_keys;
+        const int cl = m.modify_cursor_keys, fl = m.modify_function_keys;
         switch (key) {
-        case Key::Up: return csi_letter(p, 'A', ckm);
-        case Key::Down: return csi_letter(p, 'B', ckm);
-        case Key::Right: return csi_letter(p, 'C', ckm);
-        case Key::Left: return csi_letter(p, 'D', ckm);
-        case Key::Home: return csi_letter(p, 'H', ckm);
-        case Key::End: return csi_letter(p, 'F', ckm);
-        case Key::F1: return csi_letter(p, 'P', true);
-        case Key::F2: return csi_letter(p, 'Q', true);
-        case Key::F3: return csi_letter(p, 'R', true);
-        case Key::F4: return csi_letter(p, 'S', true);
-        case Key::Insert: return csi_tilde(2, p);
-        case Key::Delete: return csi_tilde(3, p);
-        case Key::PageUp: return csi_tilde(5, p);
-        case Key::PageDown: return csi_tilde(6, p);
-        case Key::F5: return csi_tilde(15, p);
-        case Key::F6: return csi_tilde(17, p);
-        case Key::F7: return csi_tilde(18, p);
-        case Key::F8: return csi_tilde(19, p);
-        case Key::F9: return csi_tilde(20, p);
-        case Key::F10: return csi_tilde(21, p);
-        case Key::F11: return csi_tilde(23, p);
-        case Key::F12: return csi_tilde(24, p);
-        case Key::Menu: return csi_tilde(29, p);
+        case Key::Up: return csi_letter(p, 'A', ckm, cl);
+        case Key::Down: return csi_letter(p, 'B', ckm, cl);
+        case Key::Right: return csi_letter(p, 'C', ckm, cl);
+        case Key::Left: return csi_letter(p, 'D', ckm, cl);
+        case Key::Home: return csi_letter(p, 'H', ckm, cl);
+        case Key::End: return csi_letter(p, 'F', ckm, cl);
+        case Key::F1: return csi_letter(p, 'P', true, fl);
+        case Key::F2: return csi_letter(p, 'Q', true, fl);
+        case Key::F3: return csi_letter(p, 'R', true, fl);
+        case Key::F4: return csi_letter(p, 'S', true, fl);
+        case Key::Insert: return csi_tilde(2, p, fl);
+        case Key::Delete: return csi_tilde(3, p, fl);
+        case Key::PageUp: return csi_tilde(5, p, fl);
+        case Key::PageDown: return csi_tilde(6, p, fl);
+        case Key::F5: return csi_tilde(15, p, fl);
+        case Key::F6: return csi_tilde(17, p, fl);
+        case Key::F7: return csi_tilde(18, p, fl);
+        case Key::F8: return csi_tilde(19, p, fl);
+        case Key::F9: return csi_tilde(20, p, fl);
+        case Key::F10: return csi_tilde(21, p, fl);
+        case Key::F11: return csi_tilde(23, p, fl);
+        case Key::F12: return csi_tilde(24, p, fl);
+        case Key::Menu: return csi_tilde(29, p, fl);
         case Key::Enter:
         case Key::Escape:
         case Key::Backspace:

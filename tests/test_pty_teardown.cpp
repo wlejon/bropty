@@ -141,17 +141,28 @@ int main(int argc, char** argv) {
         CHECK_EQ(r.pty->write("late"), size_t(0));
     }
     {
-        arm("write() never blocks on a child that does not read", 60);
-        Run r(child({"stubborn"}));
+        arm("write() never blocks on a child that does not read; the queue is bounded", 60);
+        PtyConfig c = child({"stubborn"});
+        c.input_buffer_bytes = 1u << 20;
+        Run r(c);
         CHECK(r.ok);
         CHECK(r.wait_for_text("READY"));
-        std::string block(1 << 20, 'z');
+        std::string block(64 << 10, 'z');
         auto t = Clock::now();
-        for (int i = 0; i < 16; ++i) CHECK_EQ(r.pty->write(block), block.size());
+        size_t queued = 0, refused = 0;
+        for (int i = 0; i < 256; ++i) {  // 16 MiB offered
+            size_t n = r.pty->write(block);
+            CHECK(n == 0 || n == block.size());  // all or nothing
+            if (n) queued += n;
+            else ++refused;
+        }
         double ms = ms_since(t);
-        std::printf("  info: queued 16 MiB of input in %.1f ms; %zu still pending\n", ms, r.pty->pending_input());
+        std::printf("  info: offered 16 MiB in %.1f ms: %zu queued, %zu blocks refused, %zu pending\n", ms, queued,
+                    refused, r.pty->pending_input());
         CHECK(ms < 1000);
-        CHECK(r.pty->pending_input() > 0);
+        CHECK(refused > 0);
+        CHECK(r.pty->pending_input() <= c.input_buffer_bytes);
+        CHECK(r.pty->pending_input() + r.pty->input_space() == c.input_buffer_bytes);
         destroy_within(r.release(), 6000, "child with 16 MiB of unread input");
     }
     {

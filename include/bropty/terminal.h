@@ -72,6 +72,13 @@ public:
     virtual void palette_changed() {}
     // APC payload (e.g. kitty graphics protocol), raw.
     virtual void apc(std::string_view payload) { (void)payload; }
+    // The application changed the terminal's size itself (DECCOLM, when
+    // ?40 allows it): the Terminal has already resized; the host should make
+    // its window (and the pty) match.
+    virtual void resized_by_application(int cols, int rows) {
+        (void)cols;
+        (void)rows;
+    }
 };
 
 struct TerminalOptions {
@@ -115,7 +122,22 @@ struct Modes {
     bool grapheme_clustering{true};   // ?2027
     bool color_scheme_updates{false};  // ?2031
     bool in_band_resize{false};        // ?2048
-    int modify_other_keys{0};          // XTMODKEYS 4 (CSI > 4 ; Pv m): 0, 1, 2 (3 = 2)
+    bool allow_deccolm{false};         // ?40: let DECCOLM (?3) change the width
+    bool deccolm{false};               // ?3: 132 columns (honoured only under ?40)
+    bool deccolm_no_clear{false};      // ?95 DECNCSM: DECCOLM keeps the screen
+    // xterm's key-modifier resources, set by XTMODKEYS (CSI > Pp ; Pv m),
+    // disabled (-1) by CSI > Pp n, reported by XTQMODKEYS (CSI ? Pp m). The
+    // initial values are xterm's. Cursor / function / keypad / other keys shape
+    // the legacy encoder (see input.h); keyboard, modifier and special keys are
+    // kept and reported but select nothing bropty encodes differently.
+    int modify_keyboard{0};            // Pp 0
+    int modify_cursor_keys{2};         // Pp 1: -1 .. 3
+    int modify_function_keys{2};       // Pp 2: -1 .. 3
+    int modify_keypad_keys{0};         // Pp 3: -1 .. 3
+    int modify_other_keys{0};          // Pp 4: 0, 1, 2 (3 = 2)
+    int modify_modifier_keys{0};       // Pp 6
+    int modify_special_keys{0};        // Pp 7
+    int format_other_keys{0};          // XTFMTKEYS (CSI > 4 ; Pv f): 0 = CSI 27;m;c ~, 1 = CSI c;m u
 };
 
 struct CursorState {
@@ -151,6 +173,8 @@ public:
     void resize(int cols, int rows);
     // Cell size in pixels, used to answer XTWINOPS 14/16 and SGR-pixel mouse.
     void set_cell_pixel_size(int width, int height) noexcept { cell_w_ = width; cell_h_ = height; }
+    [[nodiscard]] int cell_pixel_width() const noexcept { return cell_w_; }
+    [[nodiscard]] int cell_pixel_height() const noexcept { return cell_h_; }
     void reset();  // RIS
 
     // ---- reading -----------------------------------------------------------
@@ -235,18 +259,21 @@ private:
     void dcs_unhook(bool aborted) override;
     void string_dispatch(StringKind kind, std::string_view payload) override;
 
-    // --- terminal.cpp: printing, cursor, scrolling, erasing
+    // --- terminal.cpp: cursor, scrolling, erasing
     void init(const TerminalOptions& o);
     Grid& grid() noexcept { return active_->grid; }
     Cursor& cur() noexcept { return active_->cur; }
     void update_pen();
+    // --- terminal_print.cpp: printing
     void write_cell(int y, int x, char32_t cp, Wide w);
     void clear_wide_at(int y, int x);
-    // `seg`: the segmenter state after cp, when the caller already has it.
-    void print_cluster_start(char32_t cp, int width, const unicode::GraphemeSegmenter* seg = nullptr);
-    bool try_extend_cluster(char32_t cp, unicode::GraphemeSegmenter& seg, bool& seg_valid);
+    // `seg`: the segmenter state after cp, when the caller already has it;
+    // `p`: cp's unicode::properties().
+    void print_cluster_start(char32_t cp, int width, const unicode::GraphemeSegmenter* seg, unicode::Props p);
+    bool try_extend_cluster(char32_t cp, unicode::Props p, unicode::GraphemeSegmenter& seg, bool& seg_valid);
     void attach_zero_width(char32_t cp);
     void widen_last_cluster();
+    void narrow_last_cluster();
     void wrap_line();
     int right_edge() const noexcept;  // last column printing may use
     int left_edge() const noexcept;
@@ -294,6 +321,8 @@ private:
     void designate(int slot, char final_char, char inter2);
     void kitty_keyboard(const CsiSeq& s);
     void xterm_modkeys(const CsiSeq& s);
+    void xterm_fmtkeys(const CsiSeq& s);
+    void reset_modkeys();
     void window_op(const CsiSeq& s);
     void device_status(const CsiSeq& s);
     void set_margins(int top, int bottom);
@@ -306,6 +335,9 @@ private:
     int mode_state(int mode) const;          // DECRQM Pm value
     int private_mode_state(int mode) const;
     void request_mode(const CsiSeq& s);
+    void save_private_modes(const CsiSeq& s);     // XTSAVE
+    void restore_private_modes(const CsiSeq& s);  // XTRESTORE
+    void set_column_mode(bool wide);              // DECCOLM
 
     // --- terminal_osc.cpp
     void reply(std::string_view bytes);
@@ -332,6 +364,7 @@ private:
     StyleTable styles_;
     Palette palette_;
     Modes modes_;
+    std::unordered_map<int, bool> xtsaved_;  // XTSAVE: DEC private mode -> set
 
     int top_{0};
     int bottom_{0};
