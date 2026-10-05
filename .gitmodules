@@ -1,0 +1,3 @@
+[submodule "third_party/brosearch"]
+	path = third_party/brosearch
+	url = https://github.com/wlejon/brosearch.git

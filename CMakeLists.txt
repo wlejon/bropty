@@ -17,21 +17,44 @@ if(MSVC)
     endif()
 endif()
 
+# Coverage. Scoped to a top-level build: a consumer that add_subdirectory()s
+# bropty has no business having its own build instrumented from in here.
+option(BROPTY_COVERAGE "Instrument the build for gcov coverage (GCC/Clang)" OFF)
+if(BROPTY_COVERAGE AND PROJECT_IS_TOP_LEVEL)
+    if(MSVC)
+        message(FATAL_ERROR "BROPTY_COVERAGE requires GCC or Clang (gcov instrumentation)")
+    endif()
+    add_compile_options(--coverage -O0 -g)
+    add_link_options(--coverage)
+endif()
+
 # ---- brosearch -----------------------------------------------------------------
 # Regex scrollback search (RegexMatcher, search_regex.h) runs on brosearch's
 # linear-time engine. Resolved like the other siblings: an existing `brosearch`
 # target (a superbuild already added it) wins; otherwise the standalone repo
-# beside this one (../brosearch), overridable with -DBROSEARCH_DIR=<path>.
+# beside the top-level project (../brosearch, overridable with
+# -DBROSEARCH_DIR=<path>); otherwise the third_party/brosearch submodule of the
+# top-level project. A consumer vendoring bropty carries brosearch flat in its
+# own third_party/.
 if(NOT TARGET brosearch)
-    get_filename_component(_brosearch_default "${CMAKE_CURRENT_SOURCE_DIR}/../brosearch" ABSOLUTE)
-    set(BROSEARCH_DIR "${_brosearch_default}" CACHE PATH "Path to the brosearch repo")
-    if(NOT EXISTS "${BROSEARCH_DIR}/CMakeLists.txt")
-        message(FATAL_ERROR "bropty needs brosearch: clone it beside bropty (../brosearch) or pass -DBROSEARCH_DIR=<path>")
-    endif()
-    message(STATUS "bropty: brosearch from ${BROSEARCH_DIR}")
+    set(BROSEARCH_DIR "${CMAKE_SOURCE_DIR}/../brosearch" CACHE PATH
+        "Path to the standalone brosearch repo (set to a missing path to force the submodule)")
     set(BROSEARCH_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(BROSEARCH_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
-    add_subdirectory("${BROSEARCH_DIR}" "${CMAKE_BINARY_DIR}/brosearch" EXCLUDE_FROM_ALL)
+    if(EXISTS "${BROSEARCH_DIR}/CMakeLists.txt")
+        message(STATUS "bropty: brosearch from ${BROSEARCH_DIR}")
+        add_subdirectory("${BROSEARCH_DIR}" "${CMAKE_BINARY_DIR}/brosearch" EXCLUDE_FROM_ALL)
+    elseif(EXISTS "${CMAKE_SOURCE_DIR}/third_party/brosearch/CMakeLists.txt")
+        message(STATUS "bropty: brosearch from ${CMAKE_SOURCE_DIR}/third_party/brosearch (submodule)")
+        add_subdirectory("${CMAKE_SOURCE_DIR}/third_party/brosearch" "${CMAKE_BINARY_DIR}/brosearch"
+                         EXCLUDE_FROM_ALL)
+    else()
+        message(FATAL_ERROR
+            "bropty needs brosearch (regex scrollback search): not found at ${BROSEARCH_DIR} or "
+            "${CMAKE_SOURCE_DIR}/third_party/brosearch. Clone https://github.com/wlejon/brosearch "
+            "next to this repo, run `git submodule update --init --recursive`, or pass "
+            "-DBROSEARCH_DIR=<path>.")
+    endif()
 endif()
 
 set(BROPTY_SOURCES

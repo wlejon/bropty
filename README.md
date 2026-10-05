@@ -1,11 +1,14 @@
 # bropty
 
-**bropty** is a headless terminal library for the Bro ecosystem: VT/xterm
-emulation, the cell grid and scrollback a renderer reads, and the PTY
-plumbing that feeds it. It has no rendering, windowing or scripting
-dependency (no bro, no bronze); C++20, its own CMake and ctest suite. The
-one sibling it uses is [brosearch](../brosearch), for regex scrollback
-search, resolved from `../brosearch` or `-DBROSEARCH_DIR=<path>`.
+[![CI](https://github.com/wlejon/bropty/actions/workflows/ci.yml/badge.svg)](https://github.com/wlejon/bropty/actions/workflows/ci.yml)
+
+**bropty** is a headless terminal library for the [Bro](https://github.com/wlejon/bro)
+ecosystem: VT/xterm emulation, the cell grid and scrollback a renderer reads,
+and the PTY plumbing that feeds it. It has no rendering, windowing or
+scripting dependency (no bro, no bronze); C++20, its own CMake and ctest
+suite. The one sibling it uses is [brosearch](https://github.com/wlejon/brosearch),
+for regex scrollback search (see [Building and testing](#building-and-testing)
+for how it is found).
 
 ## Layout
 
@@ -95,6 +98,24 @@ Unicode placeholders, animation), sixel and iTerm2 inline images (OSC 1337);
 
 ## Building and testing
 
+bropty needs [brosearch](https://github.com/wlejon/brosearch). CMake looks
+for it in this order: a `brosearch` target the parent project already
+defined; a checkout beside the top-level project (`../brosearch`, or
+`-DBROSEARCH_DIR=<path>`); the `third_party/brosearch` submodule. Either
+clone the two side by side, or use the pinned submodule:
+
+```bash
+git clone https://github.com/wlejon/brosearch     # side by side
+git clone https://github.com/wlejon/bropty
+
+git clone https://github.com/wlejon/bropty       # or one checkout
+cd bropty && git submodule update --init --recursive
+```
+
+A project that vendors bropty under its own `third_party/` puts brosearch
+there too, flat beside it: the fallback is resolved against the top-level
+project.
+
 ```bash
 # Windows (Visual Studio generator)
 cmake -B build
@@ -163,3 +184,21 @@ int main() {
     }
 }
 ```
+
+## License
+
+MIT; see [LICENSE](LICENSE). The tests vendor reference implementations under
+`tests/third_party/`, built only into the test executables and never linked
+into bropty:
+
+- [libvterm](https://github.com/neovim/libvterm) 0.3.3 (MIT, Paul Evans), with
+  the local patches listed in its `CMakeLists.txt`, for the differential oracle.
+- [libsixel](https://github.com/libsixel/libsixel)'s sixel decoder (MIT), as
+  the reference for bropty's sixel pixels.
+- [stb_image and stb_image_write](https://github.com/nothings/stb) (public
+  domain or MIT, at your choice), for PNG / GIF decoding and encoding in the
+  image tests.
+
+`tests/data/GraphemeBreakTest.txt` is the Unicode conformance file (Unicode
+License v3), and `src/unicode_tables.inc` is generated from the Unicode
+Character Database.

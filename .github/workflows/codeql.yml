@@ -1,0 +1,73 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+# A terminal emulator parses whatever a program writes to it, and over ssh
+# that program is on someone else's machine. bropty's VT parser, its sixel,
+# kitty and iTerm2 image decoders (with an in-tree inflater) and its base64
+# all index buffers by sizes and coordinates that arrive in that byte stream.
+# Out-of-bounds writes from an image placed past the grid, and integer overflow
+# in a width * height * 4 allocation, are the realistic bugs, and they are what
+# the C++ queries look for. The POSIX pty backend is what this analyses.
+jobs:
+  analyze:
+    name: Analyze C++
+    runs-on: ubuntu-24.04
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: bropty
+
+      - uses: actions/checkout@v7
+        with:
+          repository: wlejon/brosearch
+          path: brosearch
+
+      - name: Install Ninja
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ninja-build
+
+      # Tests off: they are scaffolding, and with them go the test-only
+      # references vendored under tests/third_party (libvterm, libsixel, stb),
+      # which are never built into bropty.
+      - name: Configure
+        run: cmake -S bropty -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBROPTY_BUILD_TESTS=OFF
+
+      # brosearch is a sibling with its own CodeQL workflow. Building it here,
+      # ahead of `init`, keeps it out of this analysis: for a compiled language
+      # CodeQL analyses what it observes the compiler compile while tracing, and
+      # `paths-ignore` does not filter compiled sources. Extracting it here
+      # would double-report every finding against the wrong repo.
+      - name: Pre-build sibling code (outside the traced build)
+        run: cmake --build build --parallel 4 --target brosearch
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: c-cpp
+          build-mode: manual
+          source-root: bropty
+          queries: security-extended
+
+      # Only bropty's own TUs are left to compile, so only they are traced.
+      - name: Build bropty (traced)
+        run: cmake --build build --parallel 4
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:c-cpp

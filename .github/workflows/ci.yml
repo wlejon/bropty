@@ -1,0 +1,196 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# bropty resolves its one sibling, brosearch (the regex engine behind
+# scrollback search), from ../brosearch first (see CMakeLists.txt), so the
+# test jobs reconstruct that layout in the runner workspace before configuring:
+#
+#     $GITHUB_WORKSPACE/
+#       bropty/      <- this repo, checked out into a named path, not the root
+#       brosearch/
+#
+# Hence `path:` on the checkouts and `cmake -S bropty`. brosearch is taken
+# from main, which mirrors how the stack is developed (everything tracks
+# main), so this CI also catches a breaking change landing there.
+#
+# The `submodule` job builds the other way, from third_party/brosearch with no
+# sibling beside it, so the fallback a consumer without the sibling layout
+# relies on cannot rot.
+#
+# The PTY tests run real shells and tests/pty_child through a real ConPTY or
+# POSIX pty on every runner. On Windows they share a ctest RESOURCE_LOCK
+# (every ConPTY is a conhost on the desktop heap), so -j only overlaps them
+# with the rest of the suite. bench_throughput runs as a test too, but it
+# checks only that each corpus left the screen in the expected state: the MB/s
+# it prints is informational, and hosted-runner timings gate nothing.
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-gcc,          os: ubuntu-24.04, cc: gcc,   cxx: g++,     config: Release }
+          - { name: linux-clang,        os: ubuntu-24.04, cc: clang, cxx: clang++, config: Release }
+          - { name: windows-msvc,       os: windows-2022,                          config: Release }
+          # Debug CRT: iterator debugging and the library's own assert()s.
+          - { name: windows-msvc-debug, os: windows-2022,                          config: Debug }
+          - { name: macos-arm64,        os: macos-15,                              config: Release }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: bropty
+
+      - uses: actions/checkout@v7
+        with:
+          repository: wlejon/brosearch
+          path: brosearch
+
+      - name: Install Ninja (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ninja-build
+
+      - name: Install Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Configure
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cmake -S bropty -B build
+          else
+            cmake -S bropty -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.config }}
+          fi
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.config }} --parallel 4
+
+      - name: Test
+        run: ctest --test-dir build -C ${{ matrix.config }} --output-on-failure -j 2
+
+      # ctest shows a passing test's output nowhere, so what a test skipped on
+      # this runner (test_image_programs' live runs of kitten icat, img2sixel,
+      # chafa and the like, when they are not installed) goes to the job
+      # summary: a skip is only honest if someone can read why.
+      - name: Skip reasons
+        if: always()
+        shell: bash
+        run: |
+          { echo "### Skipped (${{ matrix.name }})"; echo '```'
+            grep -hiE '\bskip(ped)?\b' build/Testing/Temporary/LastTest*.log || echo none
+            echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ── Submodule fallback ────────────────────────────────────────────────────
+  #
+  # No sibling checkout: brosearch comes from third_party/brosearch at the
+  # commit this repo pins. The configure step checks it really took that path.
+  submodule:
+    name: Submodule fallback · ubuntu-24.04
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: bropty
+          submodules: recursive
+
+      - name: Install Ninja
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ninja-build
+
+      - name: Configure
+        run: |
+          test ! -e brosearch
+          cmake -S bropty -B build -G Ninja -DCMAKE_BUILD_TYPE=Release | tee configure.log
+          grep -q "bropty: brosearch from .*third_party/brosearch (submodule)" configure.log
+
+      - name: Build
+        run: cmake --build build --parallel 4
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -j 2
+
+  # ── Coverage ──────────────────────────────────────────────────────────────
+  #
+  # Scoped to bropty's own src/ and include/: brosearch is measured by its own
+  # CI, and the test-only references under tests/third_party (libvterm,
+  # libsixel, stb) are not ours. Debug (-O0), so this is also the Linux job
+  # where assert()s are live.
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: bropty
+
+      - uses: actions/checkout@v7
+        with:
+          repository: wlejon/brosearch
+          path: brosearch
+
+      - name: Install gcovr + Ninja
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends gcovr ninja-build
+
+      - name: Configure (instrumented)
+        run: |
+          cmake -S bropty -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DBROPTY_COVERAGE=ON
+
+      - name: Build
+        run: cmake --build build --parallel 4
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -j 2
+
+      # pipefail: piping gcovr into tee otherwise hands the step tee's exit
+      # status, so a gcovr crash produces no report and the job still goes green.
+      #
+      # Run from the workspace root, where build/ is, with the filters spelled
+      # bropty/...: gcovr only looks for .gcda files under its root.
+      - name: Report
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p coverage-html
+          gcovr --root . \
+            --filter 'bropty/src/' --filter 'bropty/include/bropty/' \
+            --exclude-unreachable-branches \
+            --print-summary \
+            --html-details coverage-html/index.html \
+            | tee coverage-summary.txt
+          test -s coverage-html/index.html
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo '## Coverage — `src/` + `include/bropty/`'
+            echo
+            echo 'Linux only: the ConPTY backend is exercised by the Windows jobs, not measured. brosearch is measured by its own CI; the test-only references under `tests/third_party` are excluded.'
+            echo
+            echo '```'
+            cat coverage-summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-html
+          path: coverage-html/
+          retention-days: 14
