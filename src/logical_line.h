@@ -126,7 +126,7 @@ inline char* put_utf8(char* p, char32_t cp) {
 
 Style read_style(const uint8_t*& p, const uint8_t* end);
 // A style record (see encode_cells); at most kMaxStyleBytes.
-constexpr size_t kMaxStyleBytes = 1 + 3 * 4 + 3 + 1 + 5;
+constexpr size_t kMaxStyleBytes = 1 + 3 * 4 + 3 + 1 + 5 + 1;
 char* put_style(char* p, const Style& s);
 
 template <class ClusterAt>

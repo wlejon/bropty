@@ -33,6 +33,13 @@ set(BROPTY_SOURCES
     src/terminal_modes.cpp
     src/terminal_osc.cpp
     src/terminal_reflow.cpp
+    src/buffer_lines.cpp
+    src/selection.cpp
+    src/selection_text.cpp
+    src/search.cpp
+    src/links.cpp
+    src/view.cpp
+    src/frame.cpp
     src/ring_buffer.cpp
     src/key_encoder.cpp
     src/key_encoder_kitty.cpp

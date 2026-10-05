@@ -26,10 +26,14 @@ public:
     [[nodiscard]] const Cell& at(int y, int x) const noexcept { return row(y)[x]; }
 
     [[nodiscard]] uint32_t flags(int y) const noexcept { return meta_[map_[size_t(y)]].flags; }
-    void set_flags(int y, uint32_t f) noexcept { meta_[map_[size_t(y)]].flags = f; }
+    void set_flags(int y, uint32_t f) noexcept {
+        meta_[map_[size_t(y)]].flags = f;
+        changed_[size_t(y)] = 1;
+    }
     void set_flag(int y, uint32_t f, bool on) noexcept {
         uint32_t& v = meta_[map_[size_t(y)]].flags;
         v = on ? (v | f) : (v & ~f);
+        changed_[size_t(y)] = 1;
     }
     [[nodiscard]] bool wrapped(int y) const noexcept { return (flags(y) & Row_Wrapped) != 0; }
 
@@ -57,14 +61,34 @@ public:
 
     [[nodiscard]] RowView view(int y, const Style* styles) const noexcept;
 
-    // Damage tracking.
-    void mark_dirty(int y) noexcept { dirty_[size_t(y)] = 1; }
+    // Damage tracking. Dirty bits are per screen position (a scroll dirties
+    // every row it moves). Separately, each row has a content stamp that
+    // follows it as it scrolls and changes only when its content does: a
+    // write sets a per-position "changed" byte (rotated with the rows), and
+    // set_generation() folds those into per-storage-row stamps. Writes cost
+    // two byte stores; a scroll one small memmove.
+    void mark_dirty(int y) noexcept {
+        dirty_[size_t(y)] = 1;
+        changed_[size_t(y)] = 1;
+    }
     void mark_dirty(int y0, int y1) noexcept {  // [y0, y1]
-        for (int y = y0; y <= y1; ++y) dirty_[size_t(y)] = 1;
+        for (int y = y0; y <= y1; ++y) mark_dirty(y);
     }
     void mark_all_dirty() noexcept;
     [[nodiscard]] bool dirty(int y) const noexcept { return dirty_[size_t(y)] != 0; }
     void clear_dirty() noexcept;
+    // Content stamp of row y: rows changed since the last set_generation()
+    // read as the current generation.
+    [[nodiscard]] uint64_t stamp(int y) const noexcept {
+        return changed_[size_t(y)] ? gen_ : stamp_[map_[size_t(y)]];
+    }
+    // The storage row shown at y (stable while the row scrolls).
+    [[nodiscard]] uint32_t storage(int y) const noexcept { return map_[size_t(y)]; }
+    // Fold pending changes into the stamps (at the current generation), then
+    // move to generation g (> the current one).
+    void set_generation(uint64_t g) noexcept;
+    // Unique per storage allocation: changes when the grid is rebuilt.
+    [[nodiscard]] uint64_t id() const noexcept { return id_; }
 
     // Visit every cell (for style mark-and-sweep).
     template <class F>
@@ -84,6 +108,15 @@ private:
     std::vector<uint32_t> map_;
     std::vector<Meta> meta_;
     std::vector<uint8_t> dirty_;
+    std::vector<uint8_t> changed_;  // per screen position, rotated with map_ (so it follows the row)
+    std::vector<uint64_t> stamp_;   // per storage row
+    uint64_t gen_{1};
+    uint64_t id_{0};
+
+    void moved(int y0, int y1) noexcept {  // positions [y0, y1] show other rows now
+        for (int y = y0; y <= y1; ++y) dirty_[size_t(y)] = 1;
+    }
+    static uint64_t next_id() noexcept;
 };
 
 } // namespace bropty

@@ -125,6 +125,24 @@ public:
     // Whether the newest line continues onto the screen.
     [[nodiscard]] bool last_continued() const noexcept;
 
+    // Rows / lines ever dropped from the front (capacity or clear()). They
+    // number history absolutely: row i is the (dropped_rows() + i)th row
+    // kept, line k the (dropped_lines() + k)th line (see position.h).
+    [[nodiscard]] uint64_t dropped_rows() const noexcept { return dropped_rows_; }
+    [[nodiscard]] uint64_t dropped_lines() const noexcept { return dropped_lines_; }
+    // Logical line access: line k (0 = oldest) and the rows it occupies.
+    [[nodiscard]] size_t line_of_row(size_t i) const;
+    [[nodiscard]] size_t line_first_row(size_t k) const noexcept {
+        return size_t(recs_[k].first_row - recs_.front().first_row);
+    }
+    [[nodiscard]] size_t line_rows(size_t k) const noexcept { return recs_[k].rows; }
+    // Semantic Row_* flags of the line (any of its rows).
+    [[nodiscard]] uint32_t line_flags(size_t k) const noexcept { return recs_[k].flags & Row_SemanticMask; }
+    // Whether line k soft-wraps into the screen (only the newest can).
+    [[nodiscard]] bool line_continued(size_t k) const noexcept { return (recs_[k].flags & kContinued) != 0; }
+    // Decode line k; cell styles index `palette` (palette[0] is the default style).
+    void decode_line(size_t k, detail::LogicalLine& out, std::vector<Style>& palette) const;
+
     // Reflow support: remove the newest line and decode it with styles
     // interned through `table`.
     void pop_last(detail::LogicalLine& out, StyleTable& table);
@@ -189,6 +207,8 @@ private:
     uint64_t block_base_{0};  // sequence number of blocks_.front()
     uint64_t next_seq_{0};
     size_t total_rows_{0};
+    uint64_t dropped_rows_{0};
+    uint64_t dropped_lines_{0};
     detail::ByteBuf scratch_;
 
     mutable std::unordered_map<uint64_t, Decoded> cache_;

@@ -195,6 +195,8 @@ void Scrollback::pop_front() {
     const Rec& rec = recs_.front();
     blocks_[size_t(rec.block - block_base_)].live--;
     total_rows_ -= rec.rows;
+    dropped_rows_ += rec.rows;
+    dropped_lines_ += 1;
     if (!cache_.empty()) cache_.erase(rec.seq);
     recs_.pop_front();
     while (blocks_.size() > 1 && blocks_.front().live == 0) {
@@ -209,6 +211,8 @@ void Scrollback::enforce_capacity() {
 }
 
 void Scrollback::clear() {
+    dropped_rows_ += total_rows_;
+    dropped_lines_ += recs_.size();
     recs_.clear();
     blocks_.clear();
     block_base_ = 0;
@@ -278,6 +282,12 @@ const Scrollback::Decoded& Scrollback::decoded(size_t li) const {
         if (r == 0) d.flags[r] |= line.flags;
     }
     return cache_.emplace(rec.seq, std::move(d)).first->second;
+}
+
+size_t Scrollback::line_of_row(size_t i) const { return find_line(recs_.front().first_row + i); }
+
+void Scrollback::decode_line(size_t k, LogicalLine& out, std::vector<Style>& palette) const {
+    decode_rec(recs_[k], out, palette);
 }
 
 RowView Scrollback::row(size_t i) const {

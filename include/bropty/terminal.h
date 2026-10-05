@@ -9,12 +9,15 @@
 //
 // Not thread-safe: feed(), resize() and the read accessors must be called from
 // one thread (or under the embedder's lock). Row views stay valid until the
-// next mutating call.
+// next mutating call. A renderer on another thread reads Frames instead
+// (TerminalView, view.h / frame.h): immutable snapshots handed over through a
+// lock-free FrameChannel, so it never touches the Terminal or stalls it.
 
 #include "bropty/cell.h"
 #include "bropty/color.h"
 #include "bropty/grid.h"
 #include "bropty/parser.h"
+#include "bropty/position.h"
 #include "bropty/scrollback.h"
 #include "bropty/style.h"
 #include "bropty/unicode.h"
@@ -79,6 +82,22 @@ public:
         (void)cols;
         (void)rows;
     }
+};
+
+// Things that keep positions in the buffer (TerminalView: selection, search,
+// viewport) hear about the changes that renumber rows. Called on the
+// terminal's thread, from inside resize() (also when an application resizes
+// through DECCOLM, i.e. inside feed()).
+class TerminalObserver {
+public:
+    virtual ~TerminalObserver() = default;
+    // The terminal is about to resize; its state is still the old one, so
+    // positions can be converted to text offsets (see TerminalView).
+    virtual void before_resize() {}
+    // The resize (and the primary screen's reflow) is complete.
+    virtual void after_resize() {}
+    // The alternate screen was entered or left.
+    virtual void screen_switched() {}
 };
 
 struct TerminalOptions {
@@ -210,6 +229,50 @@ public:
     // Convenience (tests, debugging): UTF-8 text of a row, trailing spaces trimmed.
     [[nodiscard]] std::string row_text(int y) const { return row(y).text(); }
     [[nodiscard]] std::string history_text(size_t i) const { return history_row(i).text(); }
+
+    // ---- absolute rows (position.h) ------------------------------------------
+    // The oldest row still held: history row 0, or (on the alternate screen,
+    // which has no history) screen row 0.
+    [[nodiscard]] int64_t first_row() const noexcept {
+        return alt_screen_active() ? screen_top_row() : int64_t(scrollback_.dropped_rows());
+    }
+    // Screen row 0 of the active screen.
+    [[nodiscard]] int64_t screen_top_row() const noexcept {
+        return int64_t(scrollback_.dropped_rows() + scrollback_.rows());
+    }
+    // One past the last row.
+    [[nodiscard]] int64_t end_row() const noexcept { return screen_top_row() + rows_; }
+    // Row `abs` (first_row() <= abs < end_row()); an empty view otherwise.
+    // History views share the scrollback's decode cache: read one at a time.
+    [[nodiscard]] RowView row_at(int64_t abs) const;
+    // The cursor as an absolute position.
+    [[nodiscard]] RowPos cursor_pos() const noexcept {
+        return RowPos{screen_top_row() + active_->cur.row, active_->cur.col};
+    }
+    // The OSC 133 zone newly printed text gets.
+    [[nodiscard]] Zone zone() const noexcept { return zone_; }
+
+    // ---- change tracking for readers on the terminal's thread ----------------
+    // Bumped by every feed(), resize() and reset(): nothing a reader sees
+    // changed while it stays the same.
+    [[nodiscard]] uint64_t change_count() const noexcept { return change_count_; }
+    // Per screen row: a stamp that changes whenever the row's content does
+    // (it travels with the row when the screen scrolls), paired with
+    // grid_id(), which changes when the screen's storage is rebuilt (resize,
+    // and per screen: compare both). A reader that caches row content calls
+    // advance_generation() after reading, so later writes get a new stamp.
+    [[nodiscard]] uint64_t row_stamp(int y) const noexcept { return active_->grid.stamp(y); }
+    // Which storage row (0 .. rows()-1) screen row y is; follows the row as it scrolls.
+    [[nodiscard]] uint32_t row_storage(int y) const noexcept { return active_->grid.storage(y); }
+    [[nodiscard]] uint64_t grid_id() const noexcept { return active_->grid.id(); }
+    void advance_generation() noexcept {
+        ++gen_;
+        primary_.grid.set_generation(gen_);
+        alt_.grid.set_generation(gen_);
+    }
+
+    void add_observer(TerminalObserver* o);
+    void remove_observer(TerminalObserver* o);
 
 private:
     struct Charsets {
@@ -390,6 +453,11 @@ private:
     std::unordered_map<std::string, uint32_t> link_by_id_;
     uint32_t next_link_{1};
     size_t link_sweep_threshold_{1024};
+
+    Zone zone_{Zone::None};
+    uint64_t change_count_{0};
+    uint64_t gen_{1};
+    std::vector<TerminalObserver*> observers_;
 
     std::string title_;
     std::string icon_name_;

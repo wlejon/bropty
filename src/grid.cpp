@@ -1,6 +1,7 @@
 #include "bropty/grid.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 
 namespace bropty {
@@ -11,6 +12,24 @@ Grid::Grid(int cols, int rows) : cols_(std::max(1, cols)), rows_(std::max(1, row
     meta_.resize(size_t(rows_));
     for (int i = 0; i < rows_; ++i) map_[size_t(i)] = uint32_t(i);
     dirty_.assign(size_t(rows_), 1);
+    changed_.assign(size_t(rows_), 1);
+    stamp_.assign(size_t(rows_), 0);
+    id_ = next_id();
+}
+
+uint64_t Grid::next_id() noexcept {
+    static std::atomic<uint64_t> counter{1};
+    return counter.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Grid::set_generation(uint64_t g) noexcept {
+    for (int y = 0; y < rows_; ++y) {
+        if (changed_[size_t(y)]) {
+            stamp_[map_[size_t(y)]] = gen_;
+            changed_[size_t(y)] = 0;
+        }
+    }
+    gen_ = g;
 }
 
 ClusterMap& Grid::clusters_mut(int y) {
@@ -38,7 +57,7 @@ void Grid::fill(int y, int x0, int x1, Cell fill) {
     std::fill(r + x0, r + x1, fill);
     auto& m = meta_[map_[size_t(y)]];
     if (m.clusters) m.clusters->erase_range(x0, x1);
-    dirty_[size_t(y)] = 1;
+    mark_dirty(y);
 }
 
 void Grid::clear_row(int y, Cell fill) {
@@ -47,7 +66,7 @@ void Grid::clear_row(int y, Cell fill) {
     auto& m = meta_[map_[size_t(y)]];
     m.flags = 0;
     if (m.clusters) m.clusters->clear();
-    dirty_[size_t(y)] = 1;
+    mark_dirty(y);
 }
 
 void Grid::rotate_up(int top, int bottom, int n) {
@@ -58,17 +77,23 @@ void Grid::rotate_up(int top, int bottom, int n) {
         uint32_t* m = map_.data();
         std::memmove(m + top, m + top + 1, size_t(bottom - top) * sizeof(uint32_t));
         map_[size_t(bottom)] = first;
+        uint8_t first_changed = changed_[size_t(top)];
+        uint8_t* c = changed_.data();
+        std::memmove(c + top, c + top + 1, size_t(bottom - top));
+        changed_[size_t(bottom)] = first_changed;
     } else {
         std::rotate(map_.begin() + top, map_.begin() + top + n, map_.begin() + bottom + 1);
+        std::rotate(changed_.begin() + top, changed_.begin() + top + n, changed_.begin() + bottom + 1);
     }
-    mark_dirty(top, bottom);
+    moved(top, bottom);
 }
 
 void Grid::rotate_down(int top, int bottom, int n) {
     if (n <= 0 || top >= bottom + 1) return;
     n = std::min(n, bottom - top + 1);
     std::rotate(map_.begin() + top, map_.begin() + (bottom + 1 - n), map_.begin() + bottom + 1);
-    mark_dirty(top, bottom);
+    std::rotate(changed_.begin() + top, changed_.begin() + (bottom + 1 - n), changed_.begin() + bottom + 1);
+    moved(top, bottom);
 }
 
 void Grid::copy_span(int sy, int sx0, int sx1, int dy, int dx) {
@@ -96,7 +121,7 @@ void Grid::copy_span(int sy, int sx0, int sx1, int dy, int dx) {
         ClusterMap& m = clusters_mut(dy);
         for (auto& [c, t] : moved) m.set(c, t);
     }
-    dirty_[size_t(dy)] = 1;
+    mark_dirty(dy);
 }
 
 void Grid::resize_crop(int cols, int rows) {
@@ -126,6 +151,9 @@ void Grid::resize_crop(int cols, int rows) {
     map_.resize(size_t(rows_));
     for (int i = 0; i < rows_; ++i) map_[size_t(i)] = uint32_t(i);
     dirty_.assign(size_t(rows_), 1);
+    changed_.assign(size_t(rows_), 1);
+    stamp_.assign(size_t(rows_), 0);
+    id_ = next_id();
 }
 
 RowView Grid::view(int y, const Style* styles) const noexcept {

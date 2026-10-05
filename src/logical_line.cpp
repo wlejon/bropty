@@ -37,6 +37,7 @@ char* put_style(char* p, const Style& s) {
     if (s.attrs) mask |= 8;
     if (s.underline != Underline::None) mask |= 16;
     if (s.link) mask |= 32;
+    if (s.zone != Zone::None) mask |= 64;
     *p++ = char(mask);
     if (mask & 1) p = put_color(p, s.fg);
     if (mask & 2) p = put_color(p, s.bg);
@@ -44,6 +45,7 @@ char* put_style(char* p, const Style& s) {
     if (mask & 8) p = put_varint(p, s.attrs);
     if (mask & 16) *p++ = char(s.underline);
     if (mask & 32) p = put_varint(p, s.link);
+    if (mask & 64) *p++ = char(s.zone);
     return p;
 }
 
@@ -57,6 +59,7 @@ Style read_style(const uint8_t*& p, const uint8_t* end) {
     if (mask & 8) s.attrs = uint16_t(read_varint(p, end));
     if ((mask & 16) && p < end) s.underline = Underline(*p++);
     if (mask & 32) s.link = uint32_t(read_varint(p, end));
+    if ((mask & 64) && p < end) s.zone = Zone(*p++ & 3);
     return s;
 }
 

@@ -324,6 +324,14 @@ void Terminal::osc_semantic(std::string_view rest) {
         grid().set_flag(cur().row, flag, true);
         grid().mark_dirty(cur().row);
     }
+    // Text printed from here on carries the zone (Style::zone). 'D' (command
+    // finished) and 'P' (prompt property) leave no zone / keep the current one.
+    Zone z = kind == 'A' ? Zone::Prompt : kind == 'B' ? Zone::Input : kind == 'C' ? Zone::Output
+           : kind == 'D' ? Zone::None : zone_;
+    if (z != zone_) {
+        zone_ = z;
+        update_pen();
+    }
     if (host_) host_->semantic_mark(kind, params);
 }
 

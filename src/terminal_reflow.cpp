@@ -46,6 +46,8 @@ void Terminal::resize(int cols, int rows) {
     cols = std::max(2, cols);
     rows = std::max(1, rows);
     if (cols == cols_ && rows == rows_) return;
+    ++change_count_;
+    for (TerminalObserver* o : observers_) o->before_resize();
     invalidate_print();
 
     // Alternate screen: crop / pad.
@@ -66,7 +68,10 @@ void Terminal::resize(int cols, int rows) {
     reset_margins();
     primary_.grid.mark_all_dirty();
     alt_.grid.mark_all_dirty();
+    primary_.grid.set_generation(gen_);  // the reflowed grid is new storage
+    alt_.grid.set_generation(gen_);
     maybe_collect_garbage();
+    for (TerminalObserver* o : observers_) o->after_resize();
 }
 
 void Terminal::reflow_primary(int new_cols, int new_rows) {
@@ -209,7 +214,10 @@ void Terminal::reflow_primary(int new_cols, int new_rows) {
                 if (c.first >= s.begin && c.first < s.end) grid.clusters_mut(y).set(int(c.first - s.begin), c.second);
             }
             uint32_t flags = 0;
-            if (r + 1 < r1) flags |= Row_Wrapped;
+            // A line cut off at the bottom (its rest no longer fits) ends
+            // here: a soft wrap into the row below would join it to whatever
+            // is written there next.
+            if (r + 1 < r1 && r + 1 - top < new_rows) flags |= Row_Wrapped;
             if (r == r0) flags |= line.flags;
             grid.set_flags(y, flags);
         }

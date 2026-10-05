@@ -47,6 +47,7 @@ Terminal::Terminal(const TerminalOptions& options)
 Terminal::~Terminal() = default;
 
 void Terminal::reset() {
+    ++change_count_;
     parser_.reset();
     const bool was_132 = modes_.deccolm;
     modes_ = Modes{};
@@ -60,6 +61,7 @@ void Terminal::reset() {
     }
     active_ = &primary_;
     styles_.clear();
+    zone_ = Zone::None;
     update_pen();
     alt_.cur.pen_id = primary_.cur.pen_id;
     alt_.cur.bce_id = primary_.cur.bce_id;
@@ -82,8 +84,25 @@ void Terminal::reset() {
 }
 
 void Terminal::feed(std::string_view bytes) {
+    ++change_count_;
     parser_.feed(bytes);
     maybe_collect_garbage();
+    ++change_count_;  // observers (resize, screen switch) may have looked mid-feed
+}
+
+RowView Terminal::row_at(int64_t abs) const {
+    const int64_t top = screen_top_row();
+    if (abs >= top) return abs < top + rows_ ? row(int(abs - top)) : RowView{};
+    if (alt_screen_active() || abs < first_row()) return RowView{};
+    return scrollback_.row(size_t(abs - first_row()));
+}
+
+void Terminal::add_observer(TerminalObserver* o) {
+    if (o && std::find(observers_.begin(), observers_.end(), o) == observers_.end()) observers_.push_back(o);
+}
+
+void Terminal::remove_observer(TerminalObserver* o) {
+    observers_.erase(std::remove(observers_.begin(), observers_.end(), o), observers_.end());
 }
 
 CursorState Terminal::cursor() const noexcept {
@@ -112,6 +131,7 @@ const Hyperlink* Terminal::hyperlink(uint32_t id) const noexcept {
 
 void Terminal::update_pen() {
     Cursor& c = cur();
+    c.pen.zone = zone_;  // the OSC 133 zone is terminal state, not SGR state
     c.pen_id = styles_.intern(c.pen);
     // Most SGRs leave the background alone: skip re-interning the erase style.
     // (bce_id stays alive across style sweeps: it is a GC root.)
@@ -288,7 +308,8 @@ void Terminal::restore_cursor() {
 void Terminal::switch_screen(bool alt, bool clear_alt, bool save_restore) {
     Screen* target = alt ? &alt_ : &primary_;
     if (alt && save_restore) save_cursor();
-    if (target != active_) {
+    const bool target_changed = target != active_;
+    if (target_changed) {
         Cursor carried = active_->cur;
         if (!alt && clear_alt) {
             for (int y = 0; y < rows_; ++y) alt_.grid.clear_row(y, Cell{});
@@ -302,6 +323,9 @@ void Terminal::switch_screen(bool alt, bool clear_alt, bool save_restore) {
     }
     if (!alt && save_restore) restore_cursor();
     invalidate_print();
+    if (target_changed) {
+        for (TerminalObserver* o : observers_) o->screen_switched();
+    }
 }
 
 // ---------------------------------------------------------------------------

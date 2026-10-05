@@ -1,12 +1,16 @@
 // Parse/emulate throughput over representative output corpora. Prints MB/s
-// per corpus; checks that each run left the screen in the expected state so
+// per corpus (plain, and with a frame published to a reader thread after
+// every 64 KiB feed); checks that each run left the screen in the expected state so
 // the measurement cannot silently test a broken path.
 //   bench_throughput [megabytes-per-corpus [corpus]]   (default 32 in Release, 4 in Debug)
 // BENCH_SB=<rows> overrides the scrollback size (0 isolates the screen path).
 #include "bropty/terminal.h"
+#include "bropty/view.h"
 #include "check.h"
 
+#include <atomic>
 #include <chrono>
+#include <thread>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -144,6 +148,45 @@ double timed(const std::string& corpus, size_t reps, Feed&& feed) {
     return double(reps * corpus.size()) / (1024.0 * 1024.0) / secs;
 }
 
+// The same feed with frames going to a renderer thread. `paced` off: a frame
+// is published after every 64 KiB feed and the reader takes them as fast as
+// it can (the worst case: a full-screen snapshot per update). `paced` on: the
+// host loop a TerminalView documents (publish only once the reader took the
+// last frame) with a reader drawing at 240 Hz.
+double with_frames(const std::string& corpus, size_t reps, const TerminalOptions& o, bool paced) {
+    Terminal t(o);
+    TerminalView view(t);
+    FrameChannel ch;
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> taken{0};
+    std::thread reader([&] {
+        size_t cells = 0;
+        while (!stop.load(std::memory_order_acquire)) {
+            if (!ch.has_new()) {
+                if (paced) std::this_thread::sleep_for(std::chrono::microseconds(4167));
+                else std::this_thread::yield();
+                continue;
+            }
+            auto f = ch.acquire();
+            for (const auto& row : f->lines) cells += row->cells.size();
+            taken.fetch_add(1, std::memory_order_relaxed);
+        }
+        CHECK(cells > 0);
+    });
+    t.feed(corpus);
+    view.publish(ch);
+    const double rate = timed(corpus, reps, [&](std::string_view s) {
+        t.feed(s);
+        view.publish(ch, paced);
+    });
+    view.publish(ch);
+    while (!ch.consumed()) std::this_thread::yield();
+    stop.store(true, std::memory_order_release);
+    reader.join();
+    CHECK(taken.load() > 0);
+    return rate;
+}
+
 const char* g_only = nullptr;  // run just this corpus (and skip the parser-alone pass)
 
 void run(const char* name, const std::string& corpus, size_t target_bytes, int cols, int rows) {
@@ -157,14 +200,19 @@ void run(const char* name, const std::string& corpus, size_t target_bytes, int c
     t.feed(corpus);  // warm up (style table, scrollback blocks)
     double rate = timed(corpus, reps, [&](std::string_view s) { t.feed(s); });
     CHECK(t.cursor().row >= 0 && t.cursor().row < rows);
+
+    const double every = with_frames(corpus, reps, o, false);
+    const double paced = with_frames(corpus, reps, o, true);
+
     if (g_only) {
-        std::printf("  %-8s %8.1f MB/s emulated\n", name, rate);
+        std::printf("  %-8s %8.1f MB/s emulated   frames: %8.1f every feed %8.1f at 240 Hz\n", name, rate, every, paced);
         return;
     }
     NullSink sink;
     Parser p(&sink);
     double prate = timed(corpus, reps, [&](std::string_view s) { p.feed(s); });
-    std::printf("  %-8s %8.1f MB/s emulated   (parser alone %8.1f MB/s)\n", name, rate, prate);
+    std::printf("  %-8s %8.1f MB/s emulated   frames: %8.1f every feed %8.1f at 240 Hz   (parser alone %8.1f MB/s)\n",
+                name, rate, every, paced, prate);
     CHECK(sink.n > 0);
 }
 

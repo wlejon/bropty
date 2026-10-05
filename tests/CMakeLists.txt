@@ -53,5 +53,17 @@ add_subdirectory(third_party/libvterm)
 bropty_test(test_vterm_diff vterm_diff_gen.cpp)
 target_link_libraries(test_vterm_diff PRIVATE bropty_test_vterm)
 
+# Renderer-facing state: selection, search, links, frame snapshots, and the
+# randomized / concurrency oracles for them.
+bropty_test(test_selection)
+bropty_test(test_search)
+bropty_test(test_links)
+bropty_test(test_frame)
+bropty_test(test_anchor_props)
+bropty_test(test_frame_stress)
+find_package(Threads REQUIRED)
+target_link_libraries(test_frame_stress PRIVATE Threads::Threads)
+
 # Parse/emulate throughput (prints MB/s per corpus; checks only correctness).
 bropty_test(bench_throughput)
+target_link_libraries(bench_throughput PRIVATE Threads::Threads)
