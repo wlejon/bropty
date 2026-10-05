@@ -211,6 +211,11 @@ bool PtyPosix::spawn(const PtyConfig& config) {
 #if defined(__linux__)
         char name[128];
         if (ptsname_r(master_, name, sizeof name) == 0) slave_name = name;
+#elif defined(__APPLE__) && defined(TIOCPTYGNAME)
+        // What Darwin's ptsname() does internally, minus its static buffer
+        // (which another library in the host may be using concurrently).
+        char name[128] = {};
+        if (ioctl(master_, TIOCPTYGNAME, name) == 0) slave_name = name;
 #else
         static std::mutex ptsname_mu;  // ptsname() uses a static buffer
         std::lock_guard<std::mutex> lock(ptsname_mu);

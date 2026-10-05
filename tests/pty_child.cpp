@@ -16,6 +16,12 @@
 //                              as hex (KEYS:1b5b41...), exit
 //   pty_child size             print SIZE <rows>x<cols> now and after every
 //                              input byte, until 'q'
+//   pty_child tty              (POSIX) print TTY lead=<0|1> fg=<0|1>
+//                              devtty=<0|1>: session leader, the foreground
+//                              process group of its controlling terminal,
+//                              /dev/tty opens; then VIA-DEVTTY written to it
+//   pty_child cooked           (POSIX) print READY, then block reading stdin
+//                              in the default (cooked, ISIG) mode
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -29,6 +35,7 @@
 #include <windows.h>
 #else
 #include <csignal>
+#include <fcntl.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -180,6 +187,29 @@ int main(int argc, char** argv) {
         out(hex + "\n");
         return 0;
     }
+#if !defined(_WIN32)
+    if (mode == "tty") {
+        const bool lead = getsid(0) == getpid();
+        const bool fg = tcgetpgrp(0) == getpgrp();
+        // Darwin's /dev/tty is its own device node (fstat does not resolve to
+        // the slave), so prove it is the pty by writing through it.
+        int fd = ::open("/dev/tty", O_RDWR | O_NOCTTY);
+        out(std::string("TTY lead=") + (lead ? "1" : "0") + " fg=" + (fg ? "1" : "0") +
+            " devtty=" + (fd >= 0 ? "1" : "0") + "\n");
+        if (fd >= 0) {
+            const char msg[] = "VIA-DEVTTY\n";
+            ssize_t n = ::write(fd, msg, sizeof msg - 1);
+            (void)n;
+            ::close(fd);
+        }
+        return 0;
+    }
+    if (mode == "cooked") {
+        out("READY\n");
+        for (;;)
+            if (read_byte() < 0) return 0;
+    }
+#endif
     if (mode == "size") {
         raw_mode();
         out(size_text() + "\n");

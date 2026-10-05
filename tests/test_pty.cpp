@@ -5,6 +5,7 @@
 //   test_pty <path-to-pty_child>
 #include "pty_harness.h"
 
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
 
@@ -267,6 +268,56 @@ int main(int argc, char** argv) {
         CHECK(r.pty->exit_code() == std::optional<int>(3));
 #endif
     }
+#if !defined(_WIN32)
+    {
+        // The child must lead a new session whose controlling terminal is the
+        // pty (setsid + TIOCSCTTY), in its foreground process group -- else
+        // /dev/tty, job control and ^C do not work.
+        arm("session and controlling terminal", 30);
+        Run r(child({"tty"}));
+        CHECK(r.ok);
+        CHECK(r.drain());
+        const bool all = r.has("TTY lead=1 fg=1 devtty=1|VIA-DEVTTY");
+        CHECK(all);
+        if (!all) std::printf("  screen: %s\n", r.screen().c_str());
+    }
+    {
+        arm("^C in cooked mode is SIGINT", 30);
+        Run r(child({"cooked"}));
+        CHECK(r.ok);
+        CHECK(r.wait_for_text("READY"));
+        r.pty->write(std::string("\x03", 1));
+        CHECK(r.pty->wait_for(10s));
+        CHECK(r.pty->exit_code() == std::optional<int>(128 + SIGINT));
+    }
+    {
+        // A child that writes and exits at once: every byte it wrote is read
+        // before EOF, whichever of exit and the final read happens first.
+        arm("no output lost at exit", 120);
+        for (int round = 0; round < 25; ++round) {
+            auto p = create_pty();
+            CHECK(p->spawn(child({"flood", std::to_string(4096 + round * 9973)})));
+            std::string got;
+            char buf[8192];
+            auto end = Clock::now() + 20s;
+            while (!p->eof() && Clock::now() < end) {
+                size_t n = p->read_timeout(buf, sizeof buf, 50ms);
+                got.append(buf, n);
+            }
+            CHECK(p->eof());
+            CHECK(p->wait_for(10s));
+            CHECK(p->exit_code() == std::optional<int>(0));
+            const std::string tail = "FLOOD-DONE\r\n";
+            const bool ok = got.size() >= tail.size() && got.compare(got.size() - tail.size(), tail.size(), tail) == 0;
+            CHECK(ok);
+            if (!ok) {
+                std::printf("  round %d: %zu bytes, ends with '%s'\n", round, got.size(),
+                            got.substr(got.size() > 40 ? got.size() - 40 : 0).c_str());
+                break;
+            }
+        }
+    }
+#endif
     {
         arm("wakeup hook", 30);
         std::atomic<int> wakes{0};

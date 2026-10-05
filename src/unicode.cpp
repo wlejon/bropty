@@ -19,6 +19,8 @@ constexpr uint16_t kControlBit = 1u << 10;
 constexpr uint16_t kWidthZero = 0;
 constexpr uint16_t kWidthWide = 2;
 constexpr uint16_t kWidthAmbiguous = 3;
+// width_of() returns the field itself for every value but ambiguous.
+static_assert(kWidthZero == 0 && kWidthWide == 2, "width field encodes the cell width directly");
 
 inline uint16_t props(char32_t cp) noexcept {
     if (cp > 0x10FFFF) cp = 0x10FFFF;  // a noncharacter: width 1, Other, like unassigned
