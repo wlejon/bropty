@@ -197,6 +197,7 @@ void Terminal::osc_dispatch(std::string_view payload, bool bel) {
         }
         break;
     }
+    case 22: osc_pointer(rest, bel); break;
     case 52: osc_clipboard(rest, bel); break;
     case 104:
         if (rest.empty()) {

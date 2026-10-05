@@ -170,5 +170,8 @@ void Session::resized_by_application(int cols, int rows) {
     push_size();
     if (delegate_) delegate_->resized_by_application(cols, rows);
 }
+void Session::pointer_shape_changed(std::string_view name) {
+    if (delegate_) delegate_->pointer_shape_changed(name);
+}
 
 } // namespace bropty

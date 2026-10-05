@@ -118,7 +118,19 @@ public:
         (void)cols;
         (void)rows;
     }
+    // OSC 22: the mouse pointer shape the application asks for over the
+    // terminal changed (also on a switch between the screens, which keep
+    // separate shape stacks, and on RIS). `name` is a CSS cursor name
+    // ("text", "pointer", "crosshair", "ew-resize", ...; X11 aliases arrive
+    // already mapped), or empty for the host's default. Terminal::pointer_shape()
+    // holds the same.
+    virtual void pointer_shape_changed(std::string_view name) { (void)name; }
 };
+
+// The CSS cursor name an OSC 22 pointer shape name stands for: the name
+// itself, or the CSS name an X11 / legacy alias (kitty's table: "left_ptr",
+// "fleur", "hand2", ...) maps to. Empty for an unknown name.
+[[nodiscard]] std::string_view pointer_shape_css_name(std::string_view name) noexcept;
 
 struct TerminalOptions {
     int cols{80};
@@ -134,6 +146,11 @@ struct TerminalOptions {
     // OSC (multipart transfers and kitty chunks are not affected).
     size_t max_string_bytes{8u << 20};
     GraphicsOptions graphics;  // inline images (graphics.h)
+    // OSC 22 queries ?__default__ / ?__grabbed__ answer with these (CSS
+    // names): the host's pointer over text, and while the program grabs the
+    // mouse (mouse reporting on). kitty's defaults.
+    std::string default_pointer_shape{"text"};
+    std::string grabbed_pointer_shape{"default"};
 };
 
 struct Hyperlink {
@@ -210,6 +227,9 @@ public:
     [[nodiscard]] const std::string& title() const noexcept { return title_; }
     [[nodiscard]] const std::string& icon_name() const noexcept { return icon_name_; }
     [[nodiscard]] const std::string& cwd() const noexcept { return cwd_; }
+    // OSC 22: the active screen's current pointer shape, a CSS cursor name;
+    // empty means the host's default (TerminalHost::pointer_shape_changed).
+    [[nodiscard]] const std::string& pointer_shape() const noexcept { return pointer_shape_; }
 
     // Damage: rows changed since the last clear_dirty().
     [[nodiscard]] bool row_dirty(int y) const noexcept { return active_->grid.dirty(y); }
@@ -343,6 +363,7 @@ private:
         Cursor cur;
         Saved saved;
         std::vector<uint32_t> kitty_flags;  // stack; back() is current
+        std::vector<uint8_t> pointer_shapes;  // OSC 22 stack; back() is current (0: default)
         Screen(int c, int r) : grid(c, r) {}
     };
 
@@ -447,6 +468,9 @@ private:
     void osc_semantic(std::string_view payload);
     void decrqss(std::string_view request);
     void xtgettcap(std::string_view request);
+    // --- terminal_pointer.cpp: OSC 22
+    void osc_pointer(std::string_view value, bool bel);
+    void pointer_shape_sync();  // re-read the active screen's shape; tell the host if it changed
 
     // --- terminal_reflow.cpp
     void reflow_primary(int cols, int rows);
@@ -539,6 +563,7 @@ private:
     std::string title_;
     std::string icon_name_;
     std::string cwd_;
+    std::string pointer_shape_;
     std::vector<std::pair<std::string, std::string>> title_stack_;
 
     CursorShape cursor_shape_{CursorShape::Block};

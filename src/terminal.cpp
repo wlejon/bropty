@@ -62,9 +62,11 @@ void Terminal::reset() {
         s->cur = Cursor{};
         s->saved = Saved{};
         s->kitty_flags.clear();
+        s->pointer_shapes.clear();
         for (int y = 0; y < rows_; ++y) s->grid.clear_row(y, Cell{});
     }
     active_ = &primary_;
+    pointer_shape_sync();
     styles_.clear();
     zone_ = Zone::None;
     update_pen();
@@ -345,6 +347,7 @@ void Terminal::switch_screen(bool alt, bool clear_alt, bool save_restore) {
     if (!alt && save_restore) restore_cursor();
     invalidate_print();
     if (target_changed) {
+        pointer_shape_sync();  // each screen has its own OSC 22 stack
         for (TerminalObserver* o : observers_) o->screen_switched();
     }
 }
