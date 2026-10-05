@@ -75,6 +75,7 @@ set(BROPTY_SOURCES
     src/terminal_modes.cpp
     src/terminal_osc.cpp
     src/terminal_pointer.cpp
+    src/terminal_notify.cpp
     src/terminal_reflow.cpp
     src/buffer_lines.cpp
     src/buffer_lines_term.cpp

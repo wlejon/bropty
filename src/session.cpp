@@ -157,6 +157,9 @@ bool Session::clipboard_read_async(uint64_t request, std::string_view sel) {
 void Session::notification(std::string_view title, std::string_view body) {
     if (delegate_) delegate_->notification(title, body);
 }
+void Session::notification_ex(const Notification& n) {
+    if (delegate_) delegate_->notification_ex(n);
+}
 void Session::progress(int state, int value) { if (delegate_) delegate_->progress(state, value); }
 void Session::semantic_mark(char kind, std::string_view params) {
     if (delegate_) delegate_->semantic_mark(kind, params);

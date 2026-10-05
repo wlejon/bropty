@@ -43,6 +43,15 @@ class Graphics;
 struct KittyCommand;
 }
 
+// A desktop notification a program asked for (TerminalHost::notification_ex).
+struct Notification {
+    std::string id;     // OSC 99 i= (sanitised to [A-Za-z0-9_+.-]); empty otherwise
+    std::string title;  // OSC 99: the body when no title was sent; OSC 9: empty
+    std::string body;
+    int urgency{-1};    // OSC 99 u=: 0 low, 1 normal, 2 critical; -1 not given
+    std::string source; // "osc9", "osc777" or "osc99"
+};
+
 class TerminalHost {
 public:
     virtual ~TerminalHost() = default;
@@ -78,11 +87,16 @@ public:
         (void)selection;
         return false;
     }
-    // OSC 9 / OSC 777 desktop notification.
+    // OSC 9 / OSC 777 desktop notification. (Called by notification_ex's
+    // default; a host overriding notification_ex does not get these.)
     virtual void notification(std::string_view title, std::string_view body) {
         (void)title;
         (void)body;
     }
+    // Every desktop notification: OSC 9, OSC 777 and kitty's OSC 99 (once
+    // all its chunks have arrived). The default passes title and body to
+    // notification(), so a host overriding only that one sees all three.
+    virtual void notification_ex(const Notification& n) { notification(n.title, n.body); }
     // OSC 9;4 progress (ConEmu / Windows Terminal): state 0 clear, 1 normal,
     // 2 error, 3 indeterminate, 4 paused; value 0..100.
     virtual void progress(int state, int value) {
@@ -223,6 +237,13 @@ public:
     bool cancel_clipboard(uint64_t request);
     [[nodiscard]] size_t pending_clipboard_requests() const noexcept { return clip_pending_.size(); }
     static constexpr size_t kMaxClipboardRequests = 16;
+
+    // OSC 99 bounds: notifications receiving chunks at once (the oldest
+    // incomplete one is dropped beyond), and the title + body bytes of one
+    // (also at most TerminalOptions::max_string_bytes; one that grows past
+    // it is dropped).
+    static constexpr size_t kMaxPendingNotifications = 16;
+    static constexpr size_t kMaxNotificationBytes = 64u << 10;
 
     [[nodiscard]] const std::string& title() const noexcept { return title_; }
     [[nodiscard]] const std::string& icon_name() const noexcept { return icon_name_; }
@@ -471,6 +492,9 @@ private:
     // --- terminal_pointer.cpp: OSC 22
     void osc_pointer(std::string_view value, bool bel);
     void pointer_shape_sync();  // re-read the active screen's shape; tell the host if it changed
+    // --- terminal_notify.cpp: OSC 9 / 777 / 99 notifications
+    void osc_notify99(std::string_view rest, bool bel);
+    void notify(Notification n);
 
     // --- terminal_reflow.cpp
     void reflow_primary(int cols, int rows);
@@ -559,6 +583,13 @@ private:
     };
     std::vector<ClipQuery> clip_pending_;
     uint64_t next_clip_{1};
+
+    // OSC 99 notifications still receiving chunks (d=0), oldest first.
+    struct PendingNote {
+        Notification n;
+        bool overflow{false};  // grew past the bound: chunks are dropped until the last
+    };
+    std::vector<PendingNote> notes_pending_;
 
     std::string title_;
     std::string icon_name_;

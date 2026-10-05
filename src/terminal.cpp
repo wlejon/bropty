@@ -79,6 +79,7 @@ void Terminal::reset() {
     cursor_shape_ = CursorShape::Block;
     cursor_shape_blink_ = true;
     title_stack_.clear();
+    notes_pending_.clear();
     last_ = LastPrint{};
     dcs_ = Dcs::None;
     gfx_->reset();

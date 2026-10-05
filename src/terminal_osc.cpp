@@ -183,8 +183,11 @@ void Terminal::osc_dispatch(std::string_view payload, bool bel) {
             int st = to_int(next_field(r), 0);
             int val = to_int(next_field(r), 0);
             if (host_) host_->progress(st, val);
-        } else if (host_) {
-            host_->notification({}, rest);
+        } else {
+            Notification n;
+            n.body.assign(rest);
+            n.source = "osc9";
+            notify(std::move(n));
         }
         break;
     case 10:
@@ -227,12 +230,16 @@ void Terminal::osc_dispatch(std::string_view payload, bool bel) {
         break;
     case 777: {
         std::string_view r = rest;
-        if (next_field(r) == "notify" && host_) {
-            std::string_view t = next_field(r);
-            host_->notification(t, r);
+        if (next_field(r) == "notify") {
+            Notification n;
+            n.title.assign(next_field(r));
+            n.body.assign(r);
+            n.source = "osc777";
+            notify(std::move(n));
         }
         break;
     }
+    case 99: osc_notify99(rest, bel); break;
     default: break;
     }
 }

@@ -125,6 +125,7 @@ public:
     // (the reply then goes to the PTY like any other, behind a pending paste).
     bool clipboard_read_async(uint64_t request, std::string_view sel) override;
     void notification(std::string_view title, std::string_view body) override;
+    void notification_ex(const Notification& n) override;
     void progress(int state, int value) override;
     void semantic_mark(char kind, std::string_view params) override;
     void palette_changed() override;
