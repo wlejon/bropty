@@ -14,6 +14,13 @@ const ImageLayer& Terminal::images(bool alternate) const noexcept { return gfx_-
 size_t Terminal::image_bytes() const noexcept { return gfx_->total_bytes(); }
 uint64_t Terminal::images_version() const noexcept { return gfx_->version(); }
 
+void Terminal::set_image_storage_limit(size_t bytes) {
+    opts_.graphics.storage_limit = bytes;
+    const uint64_t before = gfx_->version();
+    gfx_->set_storage_limit(bytes);
+    if (gfx_->version() != before) ++change_count_;
+}
+
 uint64_t Terminal::advance_animations(uint64_t now_ms) {
     bool changed = false;
     const uint64_t next = gfx_->advance(now_ms, changed);

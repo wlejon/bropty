@@ -381,6 +381,30 @@ void quotas() {
     const ih::Rgba big = ih::pattern(64, 64, 8);
     t << kitty("a=t,i=9" + dims(big), raw(big));
     CHECK(t.reply().rfind("\x1b_Gi=9;ENOSPC", 0) == 0);
+    // Lowering the quota at run time evicts now, in the same order. Held:
+    // 1 (placed first), 3 (placed later) and 5 (no placement). A quota of
+    // two images drops 5, the one nothing shows.
+    CHECK_EQ(t.t.image_bytes(), size_t(4096 * 3));
+    const uint64_t changes = t.t.change_count();
+    t.t.set_image_storage_limit(4096 * 2);
+    CHECK_EQ(t.t.graphics_options().storage_limit, size_t(4096 * 2));
+    CHECK_EQ(t.t.image_bytes(), size_t(4096 * 2));
+    CHECK(t.t.images().find(5) == nullptr);
+    CHECK(t.t.images().find(1) != nullptr && t.t.images().find(3) != nullptr);
+    CHECK(t.t.change_count() != changes);
+    // Down to one: of the placed ones, the least recently used goes.
+    t.t.set_image_storage_limit(4096);
+    CHECK(t.t.images().find(1) == nullptr && t.t.images().find(3) != nullptr);
+    // Zero: everything, and new images are refused.
+    t.t.set_image_storage_limit(0);
+    CHECK_EQ(t.t.image_bytes(), size_t(0));
+    CHECK_EQ(t.t.images().placements().size(), size_t(0));
+    t << kitty("a=t,i=10" + dims(img), raw(img));
+    CHECK(t.reply().rfind("\x1b_Gi=10;ENOSPC", 0) == 0);
+    // Raising it lets them in again.
+    t.t.set_image_storage_limit(4096 * 4);
+    t << kitty("a=t,i=11,q=2" + dims(img), raw(img));
+    CHECK(t.t.images().find(11) != nullptr);
     // Image and placement counts are capped too.
     TerminalOptions o2 = th::opts(80, 24);
     o2.graphics.max_images = 3;

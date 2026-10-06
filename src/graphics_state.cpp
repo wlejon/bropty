@@ -147,6 +147,11 @@ void Graphics::evict_image(int li, uint64_t key, bool cell) {
     ++version_;
 }
 
+void Graphics::set_storage_limit(size_t bytes) {
+    opts_.storage_limit = bytes;
+    enforce_quota(0, nullptr);
+}
+
 void Graphics::enforce_quota(size_t incoming, const Image* keep) {
     if (bytes_ + incoming <= opts_.storage_limit) return;
     struct Cand {

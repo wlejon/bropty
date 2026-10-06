@@ -31,6 +31,9 @@ public:
         return !l.placements_.empty() || !l.anchors_.empty();
     }
     [[nodiscard]] size_t total_bytes() const noexcept { return bytes_; }
+    // A new storage quota; images are evicted (as for an incoming one) until
+    // the decoded bytes fit it.
+    void set_storage_limit(size_t bytes);
     // Bumped by every change a frame shows (images, placements, animation).
     [[nodiscard]] uint64_t version() const noexcept { return version_; }
     void touch_version() noexcept { ++version_; }

@@ -376,6 +376,10 @@ public:
     // Changes whenever an image, a placement or an animation frame does.
     [[nodiscard]] uint64_t images_version() const noexcept;
     [[nodiscard]] const GraphicsOptions& graphics_options() const noexcept { return opts_.graphics; }
+    // Change GraphicsOptions::storage_limit at run time. Lowering it evicts
+    // images now, as an incoming image would (those without placements
+    // first, then the least recently used), until the rest fit.
+    void set_image_storage_limit(size_t bytes);
     // The cell size images are laid out with: set_cell_pixel_size()'s, or
     // GraphicsOptions' fallback while none is set.
     [[nodiscard]] int image_cell_width() const noexcept {
