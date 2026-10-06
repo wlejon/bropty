@@ -200,12 +200,22 @@ int main(int argc, char** argv) {
         Run r(child({"size"}), 80, 24);
         CHECK(r.ok);
         CHECK(r.wait_for_text("SIZE 24x80"));
+        // The child prints its size for every 'x'. Under ConPTY the resize
+        // travels on the console's signal pipe and the 'x' on its input pipe,
+        // which conhost serves on different threads, so the 'x' can overtake
+        // the resize: ask again until the new size shows (a POSIX pty applies
+        // TIOCSWINSZ before the write, so the first answer is it).
+        auto sees = [&](const std::string& size) {
+            for (int i = 0; i < 20; ++i) {
+                r.pty->write("x");
+                if (r.wait_for_text(size, 500ms)) return true;
+            }
+            return false;
+        };
         r.session.resize(100, 30);
-        r.pty->write("x");
-        CHECK(r.wait_for_text("SIZE 30x100"));
+        CHECK(sees("SIZE 30x100"));
         r.session.resize(50, 12);
-        r.pty->write("x");
-        CHECK(r.wait_for_text("SIZE 12x50"));
+        CHECK(sees("SIZE 12x50"));
         r.pty->write("q");
         CHECK(r.pty->wait_for(10s));
         if (!r.has("SIZE 12x50")) std::printf("  screen: %s\n", r.screen().c_str());

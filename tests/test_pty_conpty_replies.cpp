@@ -209,6 +209,7 @@ int main(int argc, char** argv) {
         {"", "OSC 52 set", "\\e]52;c;aGk=\\e\\", "\x1b]52;c;aGk=\x1b\\", ""},
         {"", "OSC 10 set", "\\e]10;rgb:1/2/3\\e\\", "\x1b]10;rgb:1/2/3\x1b\\", ""},
         {"csi", "DA1", "\\e[c", "\x1b[c", "\x1b[?62;"},
+        {"csi", "CPR", "\\e[6n", "\x1b[6n", "\x1b["},
         {"dcs", "DECRQSS", "\\eP$qm\\e\\", "\x1bP$qm", "\x1bP1$r"},
         {"csi", "CSI ? u", "\\e[?u", "\x1b[?u", "\x1b[?0u"},
     };

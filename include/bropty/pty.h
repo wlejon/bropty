@@ -21,24 +21,36 @@
 // not to the terminal: conhost renders its output and re-encodes it as VT
 // for the terminal, and parses what the terminal writes to the input pipe
 // into console input. Replies are written there byte for byte, like keys, so
-// what a program receives is conhost's doing. Observed (Windows 11 build
-// 26300; pinned by tests/test_pty_conpty_replies.cpp):
-//  * No OSC reply reaches the program. conhost's input parser discards every
-//    OSC sequence (BEL- or ST-terminated) without a trace, under ReadFile,
-//    ReadConsoleW and ReadConsoleInputW, with or without
-//    ENABLE_VIRTUAL_TERMINAL_INPUT: the OSC 4 colour answer, the OSC 52
-//    clipboard answer (Terminal::answer_clipboard), OSC 10/11 answers.
-//  * The OSC 10 / 11 / 12 colour queries and the OSC 52 clipboard query
-//    never reach the terminal: conhost swallows them on output and does not
-//    answer them either, so the program waits out its own timeout. (OSC 4
-//    queries, OSC 52 and OSC 10 sets, and unknown CSI queries do reach it.)
-//  * DA1, CPR (DSR 6) and DECRQSS are answered by conhost itself from its
-//    own state; the terminal never sees them (a program asking DA1 learns
-//    conhost's attributes, not bropty's).
-//  * CSI and DCS replies to queries conhost forwards (kitty's CSI ? u,
-//    XTVERSION, ...) arrive intact with ENABLE_VIRTUAL_TERMINAL_INPUT set;
-//    without it, conhost turns what it can parse into key events (a CPR
-//    becomes F3 with modifiers) and drops the rest.
+// what a program receives is conhost's doing, and it differs between Windows
+// builds. tests/test_pty_conpty_replies.cpp asserts bropty's side (the bytes
+// arrive in order, each reply whole or not at all; a query that reaches the
+// terminal is answered) and prints what the build it runs on does (CI puts
+// the Windows runner's report in the job summary). Observed on Windows 11
+// build 26300 and Windows Server 2022 (build 20348, the CI runners):
+//  * No OSC reply reaches the program on either build. conhost's input
+//    parser discards every OSC sequence (BEL- or ST-terminated) without a
+//    trace, under ReadFile, ReadConsoleW and ReadConsoleInputW, with or
+//    without ENABLE_VIRTUAL_TERMINAL_INPUT: the OSC 4 colour answer, the
+//    OSC 52 clipboard answer (Terminal::answer_clipboard), OSC 10/11/12
+//    answers.
+//  * Which OSC queries reach the terminal depends on the build. 26300
+//    forwards OSC 4 queries but swallows the OSC 10 / 11 / 12 colour queries
+//    (and does not answer them). 20348 forwards OSC 4 and OSC 10 / 11 / 12
+//    queries; bropty answers them, and conhost then drops the answer on the
+//    way in. Either way the program waits out its own timeout. Neither build
+//    forwards the OSC 52 clipboard query. OSC 52 and OSC 10 sets, and CSI
+//    queries conhost does not know (kitty's CSI ? u), reach the terminal on
+//    both.
+//  * DA1 and CPR (DSR 6) are answered by conhost itself from its own state
+//    and never reach the terminal (a program asking DA1 learns conhost's
+//    attributes, not bropty's: "?61;6;7;21;22;23;24;28;32;42c" on 26300,
+//    "?1;0c" on 20348). DECRQSS is answered by conhost on 26300; on 20348 it
+//    is neither forwarded nor answered.
+//  * CSI replies to queries conhost forwards arrive intact with
+//    ENABLE_VIRTUAL_TERMINAL_INPUT set, on both builds. DCS replies
+//    (XTVERSION, XTGETTCAP) arrive intact on 26300 and are dropped on 20348.
+//    Without ENABLE_VIRTUAL_TERMINAL_INPUT, conhost turns what it can parse
+//    into key events (a CPR becomes F3 with modifiers) and drops the rest.
 // Every program under ConPTY is behind conhost, WSL's included. POSIX ptys
 // deliver every reply.
 
