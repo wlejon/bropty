@@ -10,8 +10,14 @@
 //                              (BMP code point, as UTF-8) expanded
 //   pty_child stubborn         ignore SIGHUP/SIGTERM/SIGINT (Windows: block in
 //                              the console control handler), print READY, sleep
-//   pty_child flood <bytes>    write that many bytes of numbered lines (0 =
-//                              forever), then FLOOD-DONE
+//   pty_child flood <bytes> [chunk]
+//                              write that many bytes of numbered lines (0 =
+//                              forever), then FLOOD-DONE. Without `chunk`, one
+//                              stdio write per line (stdout to a console is
+//                              unbuffered); with it, the lines in blocks of
+//                              `chunk` bytes, one OS write each (WriteFile on
+//                              the console handle / write(1)), lines ending
+//                              in CR LF as stdio's text mode writes them
 //   pty_child keys <n>         raw mode, print READY, read n bytes, print them
 //                              as hex (KEYS:1b5b41...), exit
 //   pty_child size             print SIZE <rows>x<cols> now and after every
@@ -34,6 +40,7 @@
 //                              (Windows: plus CREATE_BREAKAWAY_FROM_JOB)
 #include "test_common.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -214,6 +221,44 @@ int main(int argc, char** argv) {
 #endif
         out("READY\n");
         for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    if (mode == "flood" && argc > 3) {
+        const long long limit = std::atoll(argv[2]);
+        const size_t chunk = size_t(std::max(1LL, std::atoll(argv[3])));
+        long long sent = 0;
+        std::string buf;
+        auto flush_buf = [&](size_t upto) {
+            size_t off = 0;
+            while (off < upto) {
+                const size_t n = std::min(chunk, upto - off);
+#if defined(_WIN32)
+                DWORD w = 0;
+                if (!WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), buf.data() + off, DWORD(n), &w, nullptr) || !w) return;
+#else
+                const ssize_t w = ::write(1, buf.data() + off, n);
+                if (w <= 0) return;
+#endif
+                off += size_t(w);
+            }
+            buf.erase(0, upto);
+        };
+        for (long long n = 0; limit == 0 || sent < limit; ++n) {
+            // The bytes the line-at-a-time flood sends through stdio (CR LF
+            // on Windows, where text mode adds the CR).
+#if defined(_WIN32)
+            const char* eol = "\r\n";
+#else
+            const char* eol = "\n";
+#endif
+            const std::string line =
+                "flood line " + std::to_string(n) + " ................................................" + eol;
+            buf += line;
+            sent += static_cast<long long>(line.size());
+            if (buf.size() >= chunk) flush_buf(buf.size() - buf.size() % chunk);
+        }
+        flush_buf(buf.size());
+        out("FLOOD-DONE\n");
+        return 0;
     }
     if (mode == "flood") {
         long long limit = argc > 2 ? std::atoll(argv[2]) : 0;

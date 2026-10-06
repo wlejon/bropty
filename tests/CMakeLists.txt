@@ -102,3 +102,11 @@ bropty_image_test(test_image_programs)
 # Parse/emulate throughput (prints MB/s per corpus; checks only correctness).
 bropty_test(bench_throughput)
 target_link_libraries(bench_throughput PRIVATE Threads::Threads)
+
+# PTY transport throughput (bropty's PTY, and a bare ConPTY on Windows),
+# for several write patterns of the child. Built, not run by ctest:
+#   bench_pty <pty_child> [megabytes] [line|4k|64k...]
+add_executable(bench_pty bench_pty.cpp)
+target_link_libraries(bench_pty PRIVATE bropty Threads::Threads)
+target_include_directories(bench_pty PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_dependencies(bench_pty pty_child)
