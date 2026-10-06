@@ -210,9 +210,17 @@ public:
     //     answer is the process tree: from the child, repeatedly the youngest
     //     live child process that is a console program (GUI programs started
     //     from the shell do not hold the console, and console hosts are not
-    //     the user's), until one has none. A console program the shell runs
-    //     in the background (`start /b`) is indistinguishable from one it
-    //     waits for, and is reported as foreground while it is the youngest.
+    //     the user's), until one has none. A child in a console process group
+    //     of its own is passed over: CREATE_NEW_PROCESS_GROUP is how a
+    //     console program is started out of the user's reach (Ctrl+C no
+    //     longer reaches it), as cmd's `start /b` does: the console's notion
+    //     of a background job. A background program
+    //     started without it (by a shell that does not use the flag) is
+    //     indistinguishable from one the shell waits for, and a foreground
+    //     program its launcher put in a new group is reported as that
+    //     launcher. (The group is read from the process's parameters block,
+    //     which needs PROCESS_VM_READ; a process that refuses it, such as an
+    //     elevated one, is judged by the tree alone.)
     // Callable from any thread; it costs a few system calls on POSIX and a
     // process snapshot on Windows (~1 ms), so poll it on activity, not per frame.
     [[nodiscard]] virtual std::optional<ProcessInfo> foreground_process() const = 0;

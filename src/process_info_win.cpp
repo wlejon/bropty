@@ -1,6 +1,7 @@
 // IPtyProcess::foreground_process() on Windows: the child's process tree,
-// walked down through the youngest live console program at each level (see
-// the comment on foreground_process in bropty/pty.h for why the tree).
+// walked down through the youngest live console program at each level that
+// shares its parent's console process group (see the comment on
+// foreground_process in bropty/pty.h for why the tree, and why the group).
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -123,6 +124,59 @@ bool is_console_program(const std::wstring& path) {
 
 } // namespace
 
+// RTL_USER_PROCESS_PARAMETERS::ProcessGroupId (Windows 8 and later), read
+// from the process's PEB. It is the console process group the process joined
+// the console with: its creator's, or its own pid when it was created with
+// CREATE_NEW_PROCESS_GROUP. The structure is not documented, but its layout
+// is fixed (the console client depends on it); `Length` guards the read.
+std::optional<uint32_t> console_process_group(int64_t pid) {
+    if (pid <= 0) return std::nullopt;
+    using NtQip = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    static const NtQip query = [] {
+        HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+        return nt ? reinterpret_cast<NtQip>(reinterpret_cast<void*>(GetProcAddress(nt, "NtQueryInformationProcess")))
+                  : nullptr;
+    }();
+    if (!query) return std::nullopt;
+    Handle p(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, DWORD(pid)));
+    if (!p.h) return std::nullopt;
+    auto read = [&](uint64_t at, void* dst, size_t n) {
+        SIZE_T got = 0;
+        return at != 0 && ReadProcessMemory(p.h, reinterpret_cast<LPCVOID>(uintptr_t(at)), dst, n, &got) && got == n;
+    };
+    // A 32-bit process on 64-bit Windows connects to the console from its own
+    // (32-bit) parameters; its PEB is ProcessWow64Information's answer.
+    constexpr ULONG kProcessBasicInformation = 0, kProcessWow64Information = 26;
+    ULONG_PTR peb32 = 0;
+    uint64_t params = 0;
+    uint32_t group = 0, length = 0;
+    if (sizeof(void*) == 8 && query(p.h, kProcessWow64Information, &peb32, sizeof peb32, nullptr) >= 0 && peb32) {
+        uint32_t params32 = 0;
+        if (!read(uint64_t(peb32) + 0x10, &params32, sizeof params32)) return std::nullopt;
+        params = params32;
+        constexpr uint64_t kGroup32 = 0x29c;
+        if (!read(params + 4, &length, sizeof length) || length < kGroup32 + 4) return std::nullopt;
+        if (!read(params + kGroup32, &group, sizeof group)) return std::nullopt;
+        return group;
+    }
+    struct BasicInformation {
+        LONG ExitStatus;
+        PVOID PebBaseAddress;
+        ULONG_PTR AffinityMask;
+        LONG BasePriority;
+        ULONG_PTR UniqueProcessId;
+        ULONG_PTR InheritedFromUniqueProcessId;
+    } basic{};
+    if (query(p.h, kProcessBasicInformation, &basic, sizeof basic, nullptr) < 0) return std::nullopt;
+    const uint64_t peb = uint64_t(uintptr_t(basic.PebBaseAddress));
+    const uint64_t params_at = sizeof(void*) == 8 ? 0x20 : 0x10;
+    const uint64_t group_at = sizeof(void*) == 8 ? 0x408 : 0x29c;
+    if (!read(peb + params_at, &params, sizeof(void*))) return std::nullopt;
+    if (!read(params + 4, &length, sizeof length) || length < group_at + 4) return std::nullopt;
+    if (!read(params + group_at, &group, sizeof group)) return std::nullopt;
+    return group;
+}
+
 bool describe_process(int64_t pid, ProcessInfo& out) {
     if (pid <= 0) return false;
     Handle p(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, DWORD(pid)));
@@ -158,6 +212,7 @@ std::optional<ProcessInfo> foreground_of_tree(int64_t root_pid, uint64_t root_cr
     DWORD current = DWORD(root_pid);
     uint64_t current_created = root_created;
     for (int depth = 0; depth < 64; ++depth) {
+        const std::optional<uint32_t> group = console_process_group(current);
         DWORD best = 0;
         uint64_t best_created = 0;
         for (const Entry& e : all) {
@@ -176,6 +231,14 @@ std::optional<ProcessInfo> foreground_of_tree(int64_t root_pid, uint64_t root_cr
             if (best != 0 && c <= best_created) continue;
             const std::wstring path = image_path(p.h);
             if (!path.empty() && !is_console_program(path)) continue;
+            // Started in a process group of its own (`start /b`, a detached
+            // spawn): out of reach of the console's Ctrl+C, a background job.
+            // (0: a 32-bit program whose WOW64 layer has yet to copy its
+            // parameters -- not known yet, so not ruled out.)
+            if (group) {
+                const std::optional<uint32_t> g = console_process_group(e.pid);
+                if (g && *g != 0 && *g != *group) continue;
+            }
             best = e.pid;
             best_created = c;
         }

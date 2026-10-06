@@ -13,6 +13,11 @@ namespace bropty::pty_detail {
 // `root_created` (a FILETIME as 100 ns ticks; a process that claims the root
 // as parent but is older than it is a stranger holding a recycled pid).
 std::optional<ProcessInfo> foreground_of_tree(int64_t root_pid, uint64_t root_created);
+// The console process group `pid` belongs to (the group id
+// GenerateConsoleCtrlEvent takes), or empty when it cannot be read. A 32-bit
+// program reads 0 for a moment after it starts, until its WOW64 layer has
+// copied its parameters.
+std::optional<uint32_t> console_process_group(int64_t pid);
 #else
 // The foreground process group of the terminal whose master is `master_fd`.
 std::optional<ProcessInfo> foreground_of_tty(int master_fd);

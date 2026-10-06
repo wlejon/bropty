@@ -3,12 +3,18 @@
 // program it runs while it runs (POSIX: the leader of the foreground process
 // group, or its lowest live member once the leader has gone; Windows: the
 // youngest console descendant), the shell again once that exits, and nothing
-// after the shell exits.
+// after the shell exits. Windows: a program started with `start /b` (a
+// console process group of its own) is not the foreground; a program run
+// beside it is.
 //   test_pty_foreground <path-to-pty_child>
 #include "pty_harness.h"
 #include "test_common.h"
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#include "process_info.h"
+
+#include <tlhelp32.h>
+#else
 #include <unistd.h>
 #endif
 
@@ -48,6 +54,25 @@ long long field(const std::string& screen, const std::string& key) {
 bool ends_with(const std::string& s, const std::string& tail) {
     return s.size() >= tail.size() && s.compare(s.size() - tail.size(), tail.size(), tail) == 0;
 }
+
+#if defined(_WIN32)
+// Wait for a live child of `parent` running `exe`; its pid, or 0.
+int64_t child_of(int64_t parent, const wchar_t* exe) {
+    const auto end = Clock::now() + 10s;
+    while (Clock::now() < end) {
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        PROCESSENTRY32W e{};
+        e.dwSize = sizeof e;
+        int64_t found = 0;
+        for (BOOL ok = Process32FirstW(snap, &e); ok && !found; ok = Process32NextW(snap, &e))
+            if (int64_t(e.th32ParentProcessID) == parent && _wcsicmp(e.szExeFile, exe) == 0) found = e.th32ProcessID;
+        CloseHandle(snap);
+        if (found) return found;
+        std::this_thread::sleep_for(20ms);
+    }
+    return 0;
+}
+#endif
 
 } // namespace
 
@@ -120,6 +145,32 @@ int main(int argc, char** argv) {
     CHECK(wait_foreground(r, is_pid(shell_pid), fg));
     show("after", fg);
 
+#if defined(_WIN32)
+    arm("a background job (start /b): still the shell", 30);
+    CHECK(r.pty->write("start /b \"\" \"" + child + "\" sleep" + enter) > 0);
+    const int64_t bg = child_of(shell_pid, L"pty_child.exe");
+    CHECK(bg > 0);
+    std::printf("  background pid=%lld group=%lld\n", static_cast<long long>(bg),
+                static_cast<long long>(pty_detail::console_process_group(bg).value_or(0)));
+    CHECK(pty_detail::console_process_group(bg) == std::optional<uint32_t>(uint32_t(bg)));
+    for (int i = 0; i < 10; ++i) {
+        r.session.update();
+        fg = r.pty->foreground_process();
+        CHECK(fg && fg->pid == shell_pid);
+        std::this_thread::sleep_for(30ms);
+    }
+    show("background", fg);
+
+    arm("a foreground program beside the background job", 30);
+    CHECK(r.pty->write("\"" + child + "\" nest 0" + enter) > 0);
+    CHECK(wait_foreground(r, [&](const std::optional<ProcessInfo>& p) { return p && p->pid != shell_pid; }, fg));
+    show("beside", fg);
+    CHECK(fg && fg->pid != bg && ends_with(fg->command_line, "nest 0"));
+    CHECK(fg && pty_detail::console_process_group(fg->pid) == pty_detail::console_process_group(shell_pid));
+    CHECK(r.pty->write("q" + enter) > 0);
+    CHECK(wait_foreground(r, is_pid(shell_pid), fg));
+#endif
+
 #if !defined(_WIN32)
     arm("a pipeline whose leader has exited: the group's live member", 30);
     // The second stage reads the terminal, not the pipe (whose EOF would
@@ -156,6 +207,33 @@ int main(int argc, char** argv) {
 #if defined(_WIN32)
     CHECK(pty_detail::describe_process(int64_t(GetCurrentProcessId()), self));
     CHECK(self.name == "test_pty_foreground.exe");
+    CHECK(pty_detail::console_process_group(int64_t(GetCurrentProcessId())).has_value());
+    CHECK(!pty_detail::console_process_group(0));
+    // A 32-bit program (WOW64) in a group of its own: read from its 32-bit PEB.
+    {
+        wchar_t sys[MAX_PATH];
+        const UINT n = GetSystemWow64DirectoryW(sys, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) {
+            std::wstring line = L"\"" + std::wstring(sys) + L"\\cmd.exe\" /d /k";
+            STARTUPINFOW si{};
+            si.cb = sizeof si;
+            PROCESS_INFORMATION pi{};
+            CHECK(CreateProcessW(nullptr, line.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+                                 nullptr, nullptr, &si, &pi));
+            if (pi.hProcess) {
+                std::optional<uint32_t> g;
+                for (int i = 0; i < 100 && !(g && *g); ++i) {  // until the loader has written its parameters
+                    g = pty_detail::console_process_group(int64_t(pi.dwProcessId));
+                    if (!(g && *g)) std::this_thread::sleep_for(10ms);
+                }
+                std::printf("  wow64 pid=%lu group=%lld\n", pi.dwProcessId, g ? static_cast<long long>(*g) : -1LL);
+                CHECK(g == std::optional<uint32_t>(pi.dwProcessId));
+                TerminateProcess(pi.hProcess, 0);
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+            }
+        }
+    }
 #else
     CHECK(pty_detail::describe_process(int64_t(getpid()), self));
     CHECK(self.name == "test_pty_foreground");
