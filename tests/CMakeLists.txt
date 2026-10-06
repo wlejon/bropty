@@ -116,3 +116,16 @@ add_executable(bench_pty bench_pty.cpp)
 target_link_libraries(bench_pty PRIVATE bropty Threads::Threads)
 target_include_directories(bench_pty PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_dependencies(bench_pty pty_child)
+
+# Every test executable links no_dialogs.cpp (see the file). init_test() in
+# test_common.h does the same per test; this makes it automatic for every
+# executable here, the helpers and benches included.
+if(WIN32)
+    get_property(_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(_t IN LISTS _test_targets)
+        get_target_property(_type ${_t} TYPE)
+        if(_type STREQUAL "EXECUTABLE")
+            target_sources(${_t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/no_dialogs.cpp)
+        endif()
+    endforeach()
+endif()
