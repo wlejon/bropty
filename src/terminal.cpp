@@ -77,8 +77,8 @@ void Terminal::reset() {
     tabs_.assign(size_t(cols_), 0);
     for (int x = 8; x < cols_; x += 8) tabs_[size_t(x)] = 1;
     palette_ = base_palette_;
-    cursor_shape_ = CursorShape::Block;
-    cursor_shape_blink_ = true;
+    cursor_shape_ = default_cursor_shape_;
+    cursor_shape_blink_ = default_cursor_blink_;
     title_stack_.clear();
     notes_pending_.clear();
     if (!commands_.empty()) {

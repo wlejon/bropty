@@ -78,6 +78,7 @@ set(BROPTY_SOURCES
     src/terminal_notify.cpp
     src/terminal_commands.cpp
     src/terminal_reflow.cpp
+    src/terminal_settings.cpp
     src/buffer_lines.cpp
     src/buffer_lines_term.cpp
     src/selection.cpp

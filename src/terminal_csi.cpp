@@ -320,7 +320,10 @@ void Terminal::set_lr_margins(int left, int right) {
 
 void Terminal::set_cursor_style(int ps) {
     switch (ps) {
-    case 0:
+    case 0:  // the host's default (set_default_cursor_style)
+        cursor_shape_ = default_cursor_shape_;
+        cursor_shape_blink_ = default_cursor_blink_;
+        break;
     case 1: cursor_shape_ = CursorShape::Block; cursor_shape_blink_ = true; break;
     case 2: cursor_shape_ = CursorShape::Block; cursor_shape_blink_ = false; break;
     case 3: cursor_shape_ = CursorShape::Underline; cursor_shape_blink_ = true; break;

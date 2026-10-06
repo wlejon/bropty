@@ -236,6 +236,19 @@ public:
     [[nodiscard]] size_t history_rows() const noexcept { return scrollback_.rows(); }
     [[nodiscard]] RowView history_row(size_t i) const { return scrollback_.row(i); }
     [[nodiscard]] const Scrollback& scrollback() const noexcept { return scrollback_; }
+    // History capacity in rows (TerminalOptions::scrollback_rows), changed
+    // while running: a lower one drops the oldest rows now, as output that
+    // overflowed it would (images and command records on them go too).
+    // terminal_settings.cpp.
+    void set_scrollback_rows(size_t rows);
+    [[nodiscard]] size_t scrollback_rows() const noexcept { return opts_.scrollback_rows; }
+    // The cursor style DECSCUSR 0 (CSI 0 SP q) and RIS return to: the host's
+    // preference, block and blinking until set. Setting it also makes it
+    // the current style, replacing whatever the program chose (as a theme
+    // change replaces the palette). terminal_settings.cpp.
+    void set_default_cursor_style(CursorShape shape, bool blink);
+    [[nodiscard]] CursorShape default_cursor_shape() const noexcept { return default_cursor_shape_; }
+    [[nodiscard]] bool default_cursor_blink() const noexcept { return default_cursor_blink_; }
     // Primary screen row even while the alternate screen is active.
     [[nodiscard]] RowView primary_row(int y) const noexcept;
 
@@ -657,6 +670,8 @@ private:
 
     CursorShape cursor_shape_{CursorShape::Block};
     bool cursor_shape_blink_{true};
+    CursorShape default_cursor_shape_{CursorShape::Block};
+    bool default_cursor_blink_{true};
     int cell_w_{0};
     int cell_h_{0};
 
