@@ -2,13 +2,41 @@
 
 [![CI](https://github.com/wlejon/bropty/actions/workflows/ci.yml/badge.svg)](https://github.com/wlejon/bropty/actions/workflows/ci.yml)
 
-**bropty** is a headless terminal library for the [Bro](https://github.com/wlejon/bro)
-ecosystem: VT/xterm emulation, the cell grid and scrollback a renderer reads,
-and the PTY plumbing that feeds it. It has no rendering, windowing or
-scripting dependency (no bro, no bronze); C++20, its own CMake and ctest
-suite. The one sibling it uses is [brosearch](https://github.com/wlejon/brosearch),
-for regex scrollback search (see [Building and testing](#building-and-testing)
-for how it is found).
+**bropty** is a headless terminal library: VT/xterm emulation, the cell grid
+and scrollback a renderer reads, and the PTY plumbing that feeds it. It has no
+rendering, windowing or scripting dependencies (no bro, no bronze); it is pure
+C++20 with its own CMake and ctest suite.
+
+In the [Bro ecosystem](https://github.com/wlejon/bro/blob/main/docs/ecosystem.md),
+bropty sits in the terminal layer: bro links it under `BRO_WITH_TERMINAL` to power
+the `<terminal>` element and the [broterm](https://github.com/wlejon/broterm)
+desktop application, and [bromux](https://github.com/wlejon/bromux) uses it for
+session PTY and emulator management. It can also be embedded directly into any
+standalone C++20 terminal emulator, multiplexer, or headless test harness.
+
+The one ecosystem sibling bropty uses is [brosearch](https://github.com/wlejon/brosearch),
+for regex scrollback search (see [Building and embedding](#building-and-embedding)).
+
+## Platforms
+
+Platform support is verified in continuous integration across GCC, Clang, and MSVC:
+
+| Platform | Compiler | PTY Backend | Emulation & Graphics |
+|----------|----------|-------------|----------------------|
+| **Linux** (x86-64, AArch64) | GCC 12+, Clang 16+ | POSIX PTY with supervisor clone process | Full VT/xterm, Kitty keyboard, Kitty graphics, Sixel, iTerm2 |
+| **Windows** (x86-64) | MSVC 2022+ | ConPTY with job object process tree | Full VT/xterm, Kitty keyboard, captured image replay |
+| **macOS** (Apple Silicon, Intel) | Apple Clang | POSIX PTY with kqueue exit watches | Full VT/xterm, Kitty keyboard, Kitty graphics, Sixel, iTerm2 |
+
+### Process tree and exit status
+
+`PtyConfig::process_tree` controls what teardown takes with it:
+- **Windows**: The default, `ProcessTree::Tree`, places the session in a kill-on-close job object so console programs that detach (`DETACHED_PROCESS`, `start /b`) still exit with the session. Programs intended to outlive the terminal must explicitly specify `CREATE_BREAKAWAY_FROM_JOB` (which the job permits). `ProcessTree::Console` restricts teardown to processes attached to the console.
+- **POSIX**: Teardown issues a clean terminal hangup: `SIGHUP` to the foreground process group, followed by `SIGTERM` and `SIGKILL` while the child remains alive. Processes that detached via `setsid()` or opted out via `nohup` survive by design.
+
+Child exit status reporting is resilient against host interference:
+- On **Linux** (x86-64 and AArch64), the child is forked by a dedicated supervisor thread-process (`clone(CLONE_VM)` with no exit signal). As a result, the host's `waitpid(-1)` handler or `SIGCHLD = SIG_IGN` cannot steal the exit status.
+- On **macOS**, a kqueue `NOTE_EXITSTATUS` watch is armed before the child may call `execve()`, preventing exit status races with host reaping.
+- On other POSIX systems, a stolen status gracefully reads as `-1`.
 
 ## Layout
 
@@ -34,153 +62,85 @@ for how it is found).
 | `bropty/input.h` | Pure input encoders: kitty keyboard protocol (all five enhancement flags), xterm legacy keys (DECCKM, DECKPAM, DECBKM, Alt/Meta as ESC or 8th bit, the XTMODKEYS resources modifyCursorKeys / modifyFunctionKeys / modifyKeypadKeys / modifyOtherKeys and XTFMTKEYS formatOtherKeys), mouse reports in every tracking mode and encoding, bracketed paste that cannot be terminated from inside, focus reports. |
 | `bropty/pty.h` | ConPTY / POSIX PTY: environment and Windows argument quoting done properly, async-signal-safe POSIX child setup with exec failures reported to `spawn()`, a bounded output buffer that backpressures the child, a bounded input queue (`write` all-or-nothing, `write_some`, `input_space`, a wakeup when it drains), an exit status that polling never consumes, and teardown that cannot hang (output drained while the console closes; SIGHUP, SIGTERM, then SIGKILL; blocked I/O woken; a child that will not die is left to a background reaper). |
 
-### Process tree and exit status
+### Terminal features & extensions
 
-`PtyConfig::process_tree` picks what teardown takes with it. The default,
-`ProcessTree::Tree`, puts the Windows session in a kill-on-close job object,
-so console programs that detach (`DETACHED_PROCESS`, `start /b`) still go
-with the session; a program that wants to outlive it must ask with
-`CREATE_BREAKAWAY_FROM_JOB`, which the job allows. `ProcessTree::Console`
-keeps the old behaviour (only what is attached to the console ends). On
-POSIX teardown is a terminal hangup: SIGHUP to the foreground group, then
-SIGTERM and SIGKILL while the child lives; descendants that `setsid()` or
-ignore SIGHUP (nohup) survive by design, as they do when a real terminal
-closes.
-
-The child's exit status cannot be stolen by a host SIGCHLD handler that calls
-`waitpid(-1)` or by `SIGCHLD = SIG_IGN`. On Linux (x86-64 and AArch64) the
-child is forked by a small supervisor thread-process (`clone(CLONE_VM)` with
-no exit signal) that the host's `waitpid(-1)` never sees; on macOS a kqueue
-`NOTE_EXITSTATUS` watch is armed before the child may exec. What remains the
-host's obligation: on macOS a host that reaps every child can let the pid be
-recycled in the microsecond between exit and bropty's signal, and on other
-POSIX systems a stolen status reads as -1.
-
-Resize passes the pixel size (cell size times cols/rows) to the PTY as well.
-
-Resize reflows the primary screen and its history as one buffer of logical
-lines, keeping the cursor (and the DECSC-saved cursor) on their characters;
-the alternate screen is cropped. Mode 2027 grapheme clustering is on by
-default (`TerminalOptions::grapheme_clustering`); VS16 widens and VS15
-narrows an emoji cluster. Among the xterm extensions: DECCOLM (?3, honoured
-only under ?40, with DECNCSM ?95; the host is told through
-`TerminalHost::resized_by_application`), XTSAVE / XTRESTORE of DEC private
-modes, and the rectangle operations (DECCRA copies grapheme clusters whole).
-
-Pointer shapes (OSC 22) follow kitty's protocol: set, push and pop on a
-stack kept per screen, the support / `__current__` / `__default__` /
-`__grabbed__` queries, CSS cursor names with kitty's X11 aliases. The current
-shape is `Terminal::pointer_shape()` (empty: the host's default) and
-`TerminalHost::pointer_shape_changed` reports every change.
-
-Desktop notifications from OSC 9, OSC 777 and kitty's OSC 99 (chunked by
-id, plain or base64, title / body / urgency; `p=?` is answered) all reach
-`TerminalHost::notification_ex` as a `Notification` carrying its source;
-its default passes title and body on to the older `notification()`. Pending
-OSC 99 chunks are bounded in size and in number of ids.
-
-Shell integration: besides setting row flags and the zone of printed text
-and calling `TerminalHost::semantic_mark`, OSC 133 marks build
-`Terminal::commands()`, a list of `CommandRecord`s (prompt, input, output and
-end positions, exit code from `D;<code>`, and the command line when the shell
-sends one via kitty's `cmdline` / `cmdline_url` or VS Code's `OSC 633;E`).
-The positions are absolute and behave like a selection's: they keep their
-rows as text scrolls into history, follow their characters through a
-resize's reflow (also one made while the alternate screen shows), and records
-that leave history are dropped or trimmed. `commands_version()` changes
-with every update.
-
-`Terminal::set_base_palette` installs the host's theme: it replaces the live
-palette (dropping program OSC 4 / 10 / 11 / 12 overrides) and is what OSC 104,
-OSC 110 / 111 / 112 and RIS reset to.
+- **Reflow & clustering**: Resize reflows the primary screen and history as one buffer of logical lines, keeping the cursor (and DECSC-saved cursor) on their characters; the alternate screen is cropped. Mode 2027 grapheme clustering is enabled by default (`TerminalOptions::grapheme_clustering`); VS16 widens and VS15 narrows emoji clusters.
+- **xterm extensions**: DECCOLM (?3, honoured under ?40 with DECNCSM ?95; reported via `TerminalHost::resized_by_application`), XTSAVE / XTRESTORE of DEC private modes, and rectangular operations (DECCRA copies grapheme clusters whole).
+- **Pointer shapes (OSC 22)**: Kitty pointer protocol support: set, push, and pop per screen stack, support/query commands, CSS cursor names with X11 aliases (`Terminal::pointer_shape()`, `TerminalHost::pointer_shape_changed`).
+- **Desktop notifications**: OSC 9, OSC 777, and chunked Kitty OSC 99 delivered through `TerminalHost::notification_ex` with bounded pending chunks.
+- **Shell integration**: OSC 133 marks populate `Terminal::commands()`, tracking `CommandRecord`s (prompt, input, output, command line, exit code). Positions survive scrolling, output eviction, and reflow.
+- **Theme management**: `Terminal::set_base_palette` installs host themes, which OSC 104, OSC 110-112, and RIS reset to.
 
 ## Graphics
 
-bropty accepts the kitty graphics protocol (transmission, placements,
-Unicode placeholders, animation), sixel and iTerm2 inline images (OSC 1337);
-`GraphicsOptions` turns each on or off and bounds what a program may send.
+bropty accepts the kitty graphics protocol (transmission, placements, Unicode placeholders, animation), sixel and iTerm2 inline images (OSC 1337); `GraphicsOptions` turns each on or off and bounds what a program may send.
 
-- **Where images live.** Kitty placements are overlays anchored to an
-  absolute cell: they scroll with the text, reflow with their top-left
-  character and are evicted with it. Sixel and iTerm2 images, and kitty
-  Unicode placeholders, are *cells* holding U+10EEEE, so they behave as text
-  does: overwritten, erased, scrolled into history and reflowed with it.
-  Selection and copy skip those cells (an image is not text); a row of only
-  image cells copies as an empty line.
-- **Rendering.** `Frame::images` lists every image visible in a
-  `TerminalView`'s viewport, already in viewport cells, with its pixel source
-  rectangle. Pixels are decoded once into immutable shared RGBA buffers
-  (`ImagePixels`); upload each once, keyed by its `serial`.
-- **The host's part.** `set_cell_pixel_size()` gives the cell size images are
-  laid out with (a fallback applies until it is set). PNG and other
-  compressed formats go through `TerminalHost::decode_image`; sixel, raw
-  RGB(A) and kitty's zlib compression are decoded in-tree. Animations advance
-  when the host calls `advance_animations(now_ms)`, which says when to call
-  it next.
-- **Safety.** Decoded pixels per terminal (least-recently-used images go
-  first), image dimensions, transmission sizes, placements and frames are all
-  bounded. Kitty file, temp-file and shared-memory transmission are off by
-  default, so a program on the far side of an ssh connection cannot read
-  local files.
+- **Where images live.** Kitty placements are overlays anchored to an absolute cell: they scroll with the text, reflow with their top-left character and are evicted with it. Sixel and iTerm2 images, and kitty Unicode placeholders, are *cells* holding U+10EEEE, so they behave as text does: overwritten, erased, scrolled into history and reflowed with it. Selection and copy skip those cells (an image is not text); a row of only image cells copies as an empty line.
+- **Rendering.** `Frame::images` lists every image visible in a `TerminalView`'s viewport, already in viewport cells, with its pixel source rectangle. Pixels are decoded once into immutable shared RGBA buffers (`ImagePixels`); upload each once, keyed by its `serial`.
+- **The host's part.** `set_cell_pixel_size()` gives the cell size images are laid out with (a fallback applies until it is set). PNG and other compressed formats go through `TerminalHost::decode_image`; sixel, raw RGB(A) and kitty's zlib compression are decoded in-tree. Animations advance when the host calls `advance_animations(now_ms)`, which says when to call it next.
+- **Safety.** Decoded pixels per terminal (least-recently-used images go first), image dimensions, transmission sizes, placements and frames are all bounded. Kitty file, temp-file and shared-memory transmission are off by default, so a program on the far side of an ssh connection cannot read local files.
 
-## Building and testing
+## Building and embedding
 
-bropty needs [brosearch](https://github.com/wlejon/brosearch). CMake looks
-for it in this order: a `brosearch` target the parent project already
-defined; a checkout beside the top-level project (`../brosearch`, or
-`-DBROSEARCH_DIR=<path>`); the `third_party/brosearch` submodule. Either
-clone the two side by side, or use the pinned submodule:
+### Dependencies
+
+bropty requires [brosearch](https://github.com/wlejon/brosearch) for linear-time regex scrollback search. CMake resolves `brosearch` automatically in this order:
+1. An existing `brosearch` target already configured by a parent build (e.g. in `bro`).
+2. Sibling directory: `../brosearch` relative to the top-level project, or an explicit `-DBROSEARCH_DIR=<path>`.
+3. Vendored submodule: `third_party/brosearch` within the repository.
+
+### Standalone build
 
 ```bash
-git clone https://github.com/wlejon/brosearch     # side by side
+# Sibling layout (clone side by side):
+git clone https://github.com/wlejon/brosearch
 git clone https://github.com/wlejon/bropty
 
-git clone https://github.com/wlejon/bropty       # or one checkout
+# Or single checkout with submodules:
+git clone https://github.com/wlejon/bropty
 cd bropty && git submodule update --init --recursive
-```
 
-A project that vendors bropty under its own `third_party/` puts brosearch
-there too, flat beside it: the fallback is resolved against the top-level
-project.
+# Linux / macOS (Ninja)
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build --output-on-failure
 
-```bash
-# Windows (Visual Studio generator)
+# Windows (MSVC / Visual Studio 2022)
 cmake -B build
 cmake --build build --config Release
-ctest --test-dir build -C Release
-
-# Linux / macOS (one build dir per config)
-cmake -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-release
-ctest --test-dir build-release
+ctest --test-dir build -C Release --output-on-failure
 ```
 
-Every test is a real ctest whose exit status reflects its checks (no
-`assert()`), so Release builds test too. Besides the hand-written suites,
-`test_unicode` runs the official `GraphemeBreakTest.txt` and `test_vterm_diff`
-is a differential oracle: random VT streams run through bropty and through a
-vendored libvterm (test-only, MIT), comparing every cell, the cursor,
-history and CPR replies; failures are shrunk to a minimal stream. Its
-handful of deliberate libvterm/xterm differences are listed in
-`tests/vterm_diff_gen.cpp` and `tests/third_party/libvterm/CMakeLists.txt`.
-The input encoders are checked against the kitty keyboard spec's tables and
-xterm's own encoder logic. `test_pty` and `test_pty_teardown` run real
-programs through a real pty: shells, plus `tests/pty_child.cpp`, a helper
-that echoes its arguments and environment, reads raw keys, reports its window
-size, floods output or ignores every polite request to exit.
-`test_anchor_props` drives random output, edits, region scrolls, resizes and
-viewport scrolls and checks the selection, search matches, viewport and
-frame rows against recomputation from scratch after every step;
-`test_frame_stress` floods a terminal with self-describing lines while a
-renderer thread validates every frame it takes (run it under TSan / ASan).
-`bench_throughput` prints parse/emulate MB/s for several output corpora, also
-with frames published to a reader thread
-(`bench_throughput [MB [corpus]]`).
+### Embedding in a CMake project
 
-## Example
+Consumers embed bropty via `add_subdirectory()` and link against `bropty::bropty`. Either clone `bropty` and `brosearch` as siblings, or place them flat under `third_party/`:
+
+```
+my_project/
+  third_party/
+    bropty/
+    brosearch/
+```
+
+In your `CMakeLists.txt`:
+
+```cmake
+# When vendoring in third_party/:
+add_subdirectory(third_party/bropty)
+
+target_link_libraries(my_terminal PRIVATE bropty::bropty)
+```
+
+Configuration options:
+- `BROPTY_BUILD_TESTS`: Build test suite (defaults to `ON` when top-level, `OFF` when embedded via `add_subdirectory`).
+- `BROPTY_BUILD_TOOLS`: Build offline tools such as `bropty_gen_unicode` (default `OFF`).
+- `BROPTY_COVERAGE`: Build with gcov coverage instrumentation on GCC/Clang (default `OFF`).
+
+## API overview
 
 ```cpp
 #include <bropty/session.h>
+#include <iostream>
 
 int main() {
     bropty::TerminalOptions opts;
@@ -195,37 +155,59 @@ int main() {
 #else
     config.command = "/bin/bash";
 #endif
-    pty->set_wakeup([] { /* wake the event loop, e.g. post an event */ });
-    if (!pty->spawn(config)) return 1;  // pty->last_error() says why
+    pty->set_wakeup([] { /* wake host event loop */ });
+    if (!pty->spawn(config)) {
+        std::cerr << "Failed to spawn PTY: " << pty->last_error() << "\n";
+        return 1;
+    }
     session.attach_pty(pty);
 
     while (!pty->eof()) {
-        // PTY output -> emulator, at most ~4 ms per call (Session::UpdateBudget);
-        // replies go back to the PTY. A producer faster than this is throttled.
+        // Feed PTY output to emulator within an execution time budget (~4ms).
+        // Application replies are directed back into the PTY.
         session.update();
+
         const bropty::Terminal& t = session.terminal();
         for (int y = 0; y < t.rows(); ++y) {
-            bropty::RowView row = t.row(y);  // cells, styles, clusters, flags
-            (void)row;                       // render with Skia / HarfBuzz ...
+            bropty::RowView row = t.row(y);  // cells, styles, grapheme clusters, dirty flags
+            (void)row;                       // pass to renderer (e.g. Skia, DirectWrite, HarfBuzz)
         }
     }
 }
 ```
 
+## Tests
+
+Every test is a real ctest executable whose exit status reflects check failures (no `assert()` reliance; failures are caught in Release builds).
+
+### Test breakdown
+
+| Category | Test Executables | What is Tested |
+|----------|------------------|----------------|
+| **Parser & Emulation** | `test_parser`, `test_screen`, `test_unicode_print`, `test_replies`, `test_reflow`, `test_scrollback`, `test_ring_buffer`, `test_xterm_modes`, `test_osc_ext`, `test_commands`, `test_terminal_settings` | VT state machine, UTF-8 ground state decode, CSI/OSC handlers, cursor addressing, logical line reflow, ring buffers, DEC private modes, shell integration records. |
+| **Input Encoders** | `test_keys_kitty`, `test_keys_legacy`, `test_mouse`, `test_paste_focus`, `test_input_session` | Kitty keyboard protocol flags, xterm modifyOtherKeys/legacy modes, mouse tracking encodings (SGR, normal), bracketed paste, focus reporting. |
+| **PTY & Process Lifecycle** | `test_pty_unit`, `test_pty`, `test_pty_teardown`, `test_pty_lifecycle`, `test_pty_foreground`, `test_pty_conpty_replies` (Windows) | Spawning real processes and shells using `pty_child` test helper, signal handling (SIGHUP, SIGTERM, SIGKILL), job object cleanups, ConPTY queries. |
+| **Oracles & Conformance** | `test_unicode`, `test_vterm_diff` | Official Unicode 17 `GraphemeBreakTest.txt` break points; differential oracle stream fuzzing against vendored libvterm comparing cells, cursor, and scrollback. |
+| **Renderer Views & Frames** | `test_selection`, `test_search`, `test_links`, `test_row_source`, `test_row_numbers`, `test_clipboard`, `test_frame`, `test_anchor_props`, `test_frame_stress` | Text selections (word/line/box/OSC 133), regex search anchoring through scroll/reflow, link detection, triple-buffered lock-free frame handoff under thread contention. |
+| **Inline Images** | `test_image_codecs`, `test_kitty_graphics`, `test_kitty_anim`, `test_sixel`, `test_image_anchor`, `test_iterm_images`, `test_image_programs` | Sixel decoding, Kitty transmission/placements/animation, iTerm2 OSC 1337 images, cell anchoring, and replay of real program captures. |
+| **Benchmarks** | `bench_throughput`, `bench_pty` | Parse/emulate MB/s throughput across realistic text corpora (validates screen state); standalone PTY transport benchmarks. |
+
+### CI skips and environment requirements
+
+- **`test_image_programs`**:
+  - Replay of captured protocol streams under `tests/data/images/programs/` runs on all platforms without dependencies.
+  - Live execution of external CLI image tools (`kitten icat`, `img2sixel`, `chafa`) runs only on POSIX systems where those binaries are detected in `PATH`; uninstalled tools are reported as skipped.
+  - Live execution is skipped entirely on Windows: ConPTY intercepts and redraws child terminal output rather than passing raw image escape sequences through.
+- **`test_vterm_diff`**:
+  - Fuzzed random VT byte sequences outside libvterm's defined behavior are marked as skipped (`kSkip`); the test asserts that skips do not exceed 2% of total runs.
+- **Windows desktop heap locking**:
+  - On Windows CI, process tests (`test_pty`, `test_pty_teardown`, etc.) are serialized using a ctest `RESOURCE_LOCK conpty` because each ConPTY instance allocates a console on the desktop heap. Non-PTY tests continue running in parallel.
+
 ## License
 
-MIT; see [LICENSE](LICENSE). The tests vendor reference implementations under
-`tests/third_party/`, built only into the test executables and never linked
-into bropty:
+MIT; see [LICENSE](LICENSE). Test-only references vendored under `tests/third_party/` are built only into test binaries and never linked into the library:
+- [libvterm](https://github.com/neovim/libvterm) 0.3.3 (MIT, Paul Evans) for the differential oracle.
+- [libsixel](https://github.com/libsixel/libsixel) (MIT) reference decoder.
+- [stb_image and stb_image_write](https://github.com/nothings/stb) (Public Domain / MIT).
 
-- [libvterm](https://github.com/neovim/libvterm) 0.3.3 (MIT, Paul Evans), with
-  the local patches listed in its `CMakeLists.txt`, for the differential oracle.
-- [libsixel](https://github.com/libsixel/libsixel)'s sixel decoder (MIT), as
-  the reference for bropty's sixel pixels.
-- [stb_image and stb_image_write](https://github.com/nothings/stb) (public
-  domain or MIT, at your choice), for PNG / GIF decoding and encoding in the
-  image tests.
-
-`tests/data/GraphemeBreakTest.txt` is the Unicode conformance file (Unicode
-License v3), and `src/unicode_tables.inc` is generated from the Unicode
-Character Database.
+`tests/data/GraphemeBreakTest.txt` is distributed under the [Unicode License v3](https://www.unicode.org/license.txt).
