@@ -314,6 +314,41 @@ void resize_and_switch() {
     CHECK(tv.terminal_or_null() == &t.t);
 }
 
+// A source that offers images (source_images) gets them in its frames,
+// placed exactly as a view over the terminal places them: kitty overlays,
+// sixel cells, and nothing once the source stops offering them.
+void images_from_source() {
+    th::T t(40, 10, 200);
+    t.t.set_cell_pixel_size(10, 20);
+    // A kitty 2 x 2 RGBA image over 6 x 3 cells, some text, then a sixel.
+    t << "top\r\n\x1b_Ga=T,f=32,s=2,v=2,c=6,r=3,i=7;" "/wAA//8AAP//AAD//wAA/w==" "\x1b\\";
+    t << "\r\n\r\n\r\nafter\r\n\x1bPq#1;2;100;0;0!30~-!30~\x1b\\\r\nend";
+    CHECK(t.t.images().placements().size() == 1);
+    CHECK(t.t.may_have_image_cells());
+    mirror::Mirror m;
+    m.copy_images(true);
+    m.pull(t.t);
+    TerminalView mv(m);
+    TerminalView tv(t.t);
+    auto fm = mv.snapshot();
+    auto ft = tv.snapshot();
+    CHECK_EQ(ft->images.size(), size_t(2));  // the overlay and the sixel's cell run
+    CHECK(fm->images == ft->images);
+    CHECK_EQ(fm->image_cell_width, 10);
+    CHECK_EQ(fm->image_cell_height, 20);
+    // Scrolled: both move the images with their text.
+    for (int i = 0; i < 4; ++i) t << "\r\nmore";
+    m.pull(t.t);
+    fm = mv.snapshot();
+    ft = tv.snapshot();
+    CHECK(fm->images == ft->images);
+    CHECK(!ft->images.empty());
+    // A source with no images shows none.
+    m.copy_images(false);
+    m.pull(t.t);
+    CHECK(mv.snapshot()->images.empty());
+}
+
 } // namespace
 
 int main() {
@@ -322,5 +357,6 @@ int main() {
     frame_row_reuse();
     rows_arrive_later();
     resize_and_switch();
+    images_from_source();
     return check::finish("test_row_source");
 }

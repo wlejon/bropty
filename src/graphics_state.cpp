@@ -76,12 +76,38 @@ bool ImageLayer::position(const Placement& p, int64_t& row, int& col) const noex
     return true;
 }
 
+void ImageLayer::clear() noexcept {
+    images_.clear();
+    cell_images_.clear();
+    placements_.clear();
+    anchors_.clear();
+}
+
+void ImageLayer::put(std::unique_ptr<Image> img) {
+    if (!img) return;
+    if (img->source == ImageSource::Kitty) {
+        const uint64_t key = img->key;
+        images_[key] = std::move(img);
+    } else {
+        const uint32_t id = img->id;
+        cell_images_[id] = std::move(img);
+    }
+}
+
 namespace detail {
 
 namespace {
 std::atomic<uint64_t> g_pixel_serial{1};
 constexpr uint64_t kAnonymousBase = uint64_t(1) << 32;
 } // namespace
+
+} // namespace detail
+
+ImagePixelsPtr make_image_pixels(uint32_t width, uint32_t height, std::vector<uint8_t> rgba) {
+    return detail::Graphics::make_pixels(width, height, std::move(rgba));
+}
+
+namespace detail {
 
 Graphics::Graphics(const GraphicsOptions& o) : opts_(o) { sixel_shared = SixelPalette::standard(); }
 

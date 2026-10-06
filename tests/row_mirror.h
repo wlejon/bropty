@@ -6,9 +6,11 @@
 // observers. Tests run Selection / Search / links / TerminalView over it and
 // compare with the same operations over the Terminal itself.
 
+#include "bropty/graphics.h"
 #include "bropty/terminal.h"
 
 #include <map>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -72,6 +74,19 @@ public:
             if (use_serials && abs >= top_) m.serial = t.row_stamp(int(abs - top_));
             rows_map_.emplace(abs, std::move(m));
         }
+        if (copy_images_) {
+            // The active screen's images, copied the way a client builds its
+            // own layer from what it was sent (pixels shared).
+            layer_.clear();
+            t.images().for_each_image([this](const bropty::Image& img) {
+                layer_.put(std::make_unique<bropty::Image>(img));
+            });
+            for (const bropty::Placement& p : t.images().placements()) layer_.add_placement(p);
+            images_.layer = &layer_;
+            images_.cell_width = t.image_cell_width();
+            images_.cell_height = t.image_cell_height();
+            images_.may_have_cells = t.may_have_image_cells();
+        }
         t.advance_generation();
         ++changes_;
         if (resized) notify_after_resize();
@@ -84,6 +99,8 @@ public:
         held_from_ = from;
         ++changes_;
     }
+    // Copy the terminal's images on each pull() and offer them (source_images).
+    void copy_images(bool on) { copy_images_ = on; }
     [[nodiscard]] const std::vector<std::pair<int64_t, int64_t>>& requests() const noexcept { return requests_; }
     void clear_requests() { requests_.clear(); }
 
@@ -117,8 +134,14 @@ public:
     const bropty::Modes& modes() const noexcept override { return modes_; }
     const bropty::Palette& palette() const noexcept override { return palette_; }
     void request_rows(int64_t first, int64_t end) const override { requests_.emplace_back(first, end); }
+    bropty::SourceImages source_images() const noexcept override {
+        return copy_images_ ? images_ : bropty::SourceImages{};
+    }
 
 private:
+    bool copy_images_{false};
+    bropty::ImageLayer layer_;
+    bropty::SourceImages images_;
     bool pulled_{false};
     uint64_t numbering_{0};
     bool alt_{false};

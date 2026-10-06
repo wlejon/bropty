@@ -214,7 +214,7 @@ std::shared_ptr<Frame> TerminalView::build() {
         palette_ = std::make_shared<const Palette>(p);
     f->palette = palette_;
     build_highlights(*f);
-    if (term_) build_images(*f);
+    build_images(*f);
     f->search_active = search_.active();
     f->search_complete = search_.complete();
     f->match_count = search_.size();

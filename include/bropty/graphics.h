@@ -70,6 +70,9 @@ struct ImagePixels {
     std::vector<uint8_t> rgba;
 };
 using ImagePixelsPtr = std::shared_ptr<const ImagePixels>;
+// Pixels with a fresh serial, unique in this process alongside every
+// terminal's own (for a RowSource that builds images it was sent).
+[[nodiscard]] ImagePixelsPtr make_image_pixels(uint32_t width, uint32_t height, std::vector<uint8_t> rgba);
 
 // What TerminalHost::decode_image produces: one frame for a still image,
 // several (with their delays) for an animation.
@@ -206,6 +209,16 @@ public:
     // relative placements up to their root; false when a parent is gone or
     // virtual (such a placement is not shown).
     bool position(const Placement& p, int64_t& row, int& col) const noexcept;
+
+    // ---- building a copy (row_source.h: RowSource::source_images) ----------
+    // A RowSource that mirrors another process's terminal (a multiplexer
+    // client) builds its own layer from what it was sent. A Terminal's layers
+    // are never changed through these.
+    void clear() noexcept;
+    // A kitty image goes in by Image::key (find() / by_key()), a sixel or
+    // iTerm2 image by Image::id (cell_image()). Replaces one already there.
+    void put(std::unique_ptr<Image> img);
+    void add_placement(const Placement& p) { placements_.push_back(p); }
 
 private:
     friend class detail::Graphics;

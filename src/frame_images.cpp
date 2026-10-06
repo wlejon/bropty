@@ -226,11 +226,21 @@ void scan_row(Ctx& c, const FrameRow& r, int y) {
 } // namespace
 
 void TerminalView::build_images(Frame& f) const {
-    const Terminal& t = *term_;
-    f.image_cell_width = t.image_cell_width();
-    f.image_cell_height = t.image_cell_height();
-    const ImageLayer& layer = t.images();
-    const bool cells = t.may_have_image_cells();
+    SourceImages si;
+    if (term_) {
+        si.layer = &term_->images();
+        si.cell_width = term_->image_cell_width();
+        si.cell_height = term_->image_cell_height();
+        si.may_have_cells = term_->may_have_image_cells();
+    } else {
+        si = t_.source_images();
+        if (!si.layer) return;
+    }
+    f.image_cell_width = si.cell_width;
+    f.image_cell_height = si.cell_height;
+    if (si.cell_width <= 0 || si.cell_height <= 0) return;
+    const ImageLayer& layer = *si.layer;
+    const bool cells = si.may_have_cells;
     if (layer.placements().empty() && !cells) return;
     Ctx c{layer, f, float(f.image_cell_width), float(f.image_cell_height)};
     // Overlays in creation order (the sort below keeps it among equal z).

@@ -40,8 +40,9 @@ public:
     explicit TerminalView(Terminal& t);
     // A view over any RowSource (row_source.h), e.g. a multiplexer client's
     // model of a remote screen: the same viewport, selection, search, links
-    // and frames. Differences from a Terminal-backed view: frames carry no
-    // images, rows the source does not hold show blank until it has them
+    // and frames. Differences from a Terminal-backed view: frames carry the
+    // images the source offers (RowSource::source_images; none by default),
+    // rows the source does not hold show blank until it has them
     // (they are requested), and a resize clears the selection, restarts the
     // search and returns the viewport to the bottom (the source's reflow
     // happened where positions cannot be carried through it).

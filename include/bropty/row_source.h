@@ -34,6 +34,19 @@
 namespace bropty {
 
 class Terminal;
+class ImageLayer;
+
+// The images a source shows on its active screen (graphics.h), for a
+// TerminalView's frames: the layer (kitty images and placements, sixel /
+// iTerm2 cell images), the cell size its positions were laid out with, and
+// whether any cell may hold an image placeholder (U+10EEEE), which readers
+// then look for in the rows.
+struct SourceImages {
+    const ImageLayer* layer{nullptr};
+    int cell_width{0};
+    int cell_height{0};
+    bool may_have_cells{false};
+};
 
 // Things that keep positions in the buffer (TerminalView: selection, search,
 // viewport) hear about the changes that renumber rows. For a Terminal these
@@ -96,6 +109,10 @@ public:
     // logical-line store directly, carry positions through its reflow, and
     // show its images.
     [[nodiscard]] virtual const Terminal* terminal() const noexcept { return nullptr; }
+    // The images of a source that is not a Terminal (a Terminal's view reads
+    // the Terminal's own). Default: none. The layer must stay valid, and
+    // unchanged, until the next change_count() change.
+    [[nodiscard]] virtual SourceImages source_images() const noexcept { return {}; }
 
     void add_observer(TerminalObserver* o);
     void remove_observer(TerminalObserver* o);
