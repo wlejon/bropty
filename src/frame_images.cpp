@@ -28,7 +28,7 @@ uint32_t color_id(const Color& c) {
 struct Ctx {
     const ImageLayer& layer;
     Frame& f;
-    float cw, ch;
+    double cw, ch;
 };
 
 // A kitty placement drawn as an overlay.
@@ -112,11 +112,12 @@ void push_cell_run(Ctx& c, const Image& img, uint32_t placement_id, int32_t z, d
 // Cells [x0, x0 + n) of viewport row y show image row i, columns j0.. of a
 // sixel / iTerm2 image.
 void sixel_run(Ctx& c, const Image& img, int y, int x0, int n, uint32_t i, uint32_t j0) {
-    if (img.cell_width <= 0 || img.cell_height <= 0) return;
-    const double xs = img.cell_width * c.cw / img.width;  // screen pixels per image pixel
-    const double ys = img.cell_height * c.ch / img.height;
-    push_cell_run(c, img, 0, 0, j0 * c.cw / xs, i * c.ch / ys, n * c.cw / xs, c.ch / ys, xs, ys, x0 * c.cw,
-                  y * c.ch);
+    if (img.cell_width <= 0 || img.cell_height <= 0 || img.width == 0 || img.height == 0) return;
+    const double xs = static_cast<double>(img.cell_width) * c.cw / static_cast<double>(img.width);  // screen pixels per image pixel
+    const double ys = static_cast<double>(img.cell_height) * c.ch / static_cast<double>(img.height);
+    push_cell_run(c, img, 0, 0, static_cast<double>(j0) * c.cw / xs, static_cast<double>(i) * c.ch / ys,
+                  static_cast<double>(n) * c.cw / xs, c.ch / ys, xs, ys, static_cast<double>(x0) * c.cw,
+                  static_cast<double>(y) * c.ch);
 }
 
 // kitty's grman_put_cell_image: the run shows box cells (img_row, img_col..)
@@ -242,7 +243,7 @@ void TerminalView::build_images(Frame& f) const {
     const ImageLayer& layer = *si.layer;
     const bool cells = si.may_have_cells;
     if (layer.placements().empty() && !cells) return;
-    Ctx c{layer, f, float(f.image_cell_width), float(f.image_cell_height)};
+    Ctx c{layer, f, double(f.image_cell_width), double(f.image_cell_height)};
     // Overlays in creation order (the sort below keeps it among equal z).
     std::vector<const Placement*> ps;
     ps.reserve(layer.placements().size());
