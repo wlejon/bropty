@@ -16,6 +16,31 @@
 // make progress), asks the child to exit, escalates to a forced kill after
 // PtyConfig::terminate_grace, reaps it, and wakes every internal thread
 // regardless of what the child is doing.
+//
+// Replies under ConPTY (Windows). A native console program talks to conhost,
+// not to the terminal: conhost renders its output and re-encodes it as VT
+// for the terminal, and parses what the terminal writes to the input pipe
+// into console input. Replies are written there byte for byte, like keys, so
+// what a program receives is conhost's doing. Observed (Windows 11 build
+// 26300; pinned by tests/test_pty_conpty_replies.cpp):
+//  * No OSC reply reaches the program. conhost's input parser discards every
+//    OSC sequence (BEL- or ST-terminated) without a trace, under ReadFile,
+//    ReadConsoleW and ReadConsoleInputW, with or without
+//    ENABLE_VIRTUAL_TERMINAL_INPUT: the OSC 4 colour answer, the OSC 52
+//    clipboard answer (Terminal::answer_clipboard), OSC 10/11 answers.
+//  * The OSC 10 / 11 / 12 colour queries and the OSC 52 clipboard query
+//    never reach the terminal: conhost swallows them on output and does not
+//    answer them either, so the program waits out its own timeout. (OSC 4
+//    queries, OSC 52 and OSC 10 sets, and unknown CSI queries do reach it.)
+//  * DA1, CPR (DSR 6) and DECRQSS are answered by conhost itself from its
+//    own state; the terminal never sees them (a program asking DA1 learns
+//    conhost's attributes, not bropty's).
+//  * CSI and DCS replies to queries conhost forwards (kitty's CSI ? u,
+//    XTVERSION, ...) arrive intact with ENABLE_VIRTUAL_TERMINAL_INPUT set;
+//    without it, conhost turns what it can parse into key events (a CPR
+//    becomes F3 with modifiers) and drops the rest.
+// Every program under ConPTY is behind conhost, WSL's included. POSIX ptys
+// deliver every reply.
 
 #include "bropty/ring_buffer.h"
 

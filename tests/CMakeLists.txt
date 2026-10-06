@@ -51,7 +51,9 @@ if(WIN32)
     # Every ConPTY is a conhost (and a console on the desktop heap). The
     # process tests open dozens between them, so under ctest -j they take
     # turns rather than run at once; the rest of the suite still runs alongside.
-    set_tests_properties(test_pty test_pty_teardown test_pty_lifecycle test_pty_foreground
+    bropty_test(test_pty_conpty_replies ARGS $<TARGET_FILE:pty_child>)
+    add_dependencies(test_pty_conpty_replies pty_child)
+    set_tests_properties(test_pty test_pty_teardown test_pty_lifecycle test_pty_foreground test_pty_conpty_replies
                          PROPERTIES RESOURCE_LOCK conpty)
 endif()
 

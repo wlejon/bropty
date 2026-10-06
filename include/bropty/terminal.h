@@ -70,6 +70,8 @@ public:
     }
     // OSC 52 query. Return the clipboard contents to answer, or nullopt to
     // refuse (the default: reading the clipboard leaks data to the program).
+    // Under ConPTY a native console program's query never arrives, and no
+    // OSC reply would reach it (see "Replies under ConPTY" in pty.h).
     virtual std::optional<std::string> clipboard_read(std::string_view selection) {
         (void)selection;
         return std::nullopt;

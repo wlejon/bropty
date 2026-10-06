@@ -6,8 +6,8 @@
 //   pty_child args <a>...      print each argument as [arg]
 //   pty_child env <NAME>...    print NAME=value or NAME!unset
 //   pty_child exit <n>         exit with status n
-//   pty_child print <text>     write text with \e (ESC), \n (CR LF) and \uXXXX
-//                              (BMP code point, as UTF-8) expanded
+//   pty_child print <text>     write text with \e (ESC), \a (BEL), \n (CR LF)
+//                              and \uXXXX (BMP code point, as UTF-8) expanded
 //   pty_child stubborn         ignore SIGHUP/SIGTERM/SIGINT (Windows: block in
 //                              the console control handler), print READY, sleep
 //   pty_child flood <bytes> [chunk]
@@ -41,6 +41,19 @@
 //   pty_child nest <n>         run `pty_child nest <n-1>` and wait for it; at
 //                              0 print NEST-READY pid=<pid> (POSIX: and
 //                              pgid=<process group>), then read until 'q'
+//   pty_child replies <reader> [query]
+//                              (Windows) what a console program receives of
+//                              the terminal's replies. Set the input mode,
+//                              write `query` (escapes as for print), print
+//                              READY, read stdin until a 'q' and print
+//                              GOT <input> END, the input printable: ESC as
+//                              <1b>, other controls and non-ASCII as <hh> /
+//                              <hhhh>, a key record with no character as {vk}.
+//                              reader: file / file-vt (ReadFile), consolew-vt
+//                              (ReadConsoleW), records / records-vt
+//                              (ReadConsoleInputW, key-down records); -vt sets
+//                              ENABLE_VIRTUAL_TERMINAL_INPUT, otherwise the
+//                              input mode is 0 (no line input, no echo)
 #include "test_common.h"
 
 #include <algorithm>
@@ -67,6 +80,32 @@ namespace {
 void out(const std::string& s) {
     std::fwrite(s.data(), 1, s.size(), stdout);
     std::fflush(stdout);
+}
+
+// \e (ESC), \a (BEL), \n (CR LF) and \uXXXX (BMP code point, as UTF-8).
+std::string expand(const char* p) {
+    std::string s;
+    for (; *p; ++p) {
+        if (p[0] == '\\' && p[1] == 'e') {
+            s.push_back('\x1b');
+            ++p;
+        } else if (p[0] == '\\' && p[1] == 'a') {
+            s.push_back('\x07');
+            ++p;
+        } else if (p[0] == '\\' && p[1] == 'n') {
+            s += "\r\n";
+            ++p;
+        } else if (p[0] == '\\' && p[1] == 'u' && std::strlen(p) >= 6) {
+            unsigned cp = unsigned(std::strtoul(std::string(p + 2, 4).c_str(), nullptr, 16));
+            s.push_back(char(0xE0 | (cp >> 12)));
+            s.push_back(char(0x80 | ((cp >> 6) & 0x3F)));
+            s.push_back(char(0x80 | (cp & 0x3F)));
+            p += 5;
+        } else {
+            s.push_back(*p);
+        }
+    }
+    return s;
 }
 
 #if defined(_WIN32)
@@ -112,6 +151,72 @@ int read_byte() {
         at = 0;
     }
     return static_cast<unsigned char>(pending[at++]);
+}
+
+void printable(std::string& o, unsigned u) {
+    static const char* digits = "0123456789abcdef";
+    if (u >= 0x20 && u < 0x7f && u != '<' && u != '{') {
+        o.push_back(char(u));
+        return;
+    }
+    o.push_back('<');
+    for (int shift = u > 0xff ? 12 : 4; shift >= 0; shift -= 4) o.push_back(digits[(u >> shift) & 15]);
+    o.push_back('>');
+}
+
+// See `replies` in the header comment.
+int replies(const std::string& reader, const char* query) {
+    HANDLE in = in_handle();
+    const bool vt = reader.size() > 3 && reader.compare(reader.size() - 3, 3, "-vt") == 0;
+    SetConsoleMode(in, vt ? ENABLE_VIRTUAL_TERMINAL_INPUT : 0);
+    SetConsoleCP(CP_UTF8);
+    SetConsoleOutputCP(CP_UTF8);
+    HANDLE o = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD m = 0;
+    GetConsoleMode(o, &m);
+    SetConsoleMode(o, m | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    out(expand(query));
+    out("READY\n");
+    std::string got;
+    bool done = false;
+    while (!done) {
+        if (reader == "file" || reader == "file-vt") {
+            char buf[256];
+            DWORD n = 0;
+            if (!ReadFile(in, buf, sizeof buf, &n, nullptr) || n == 0) break;
+            for (DWORD i = 0; i < n && !done; ++i) {
+                done = buf[i] == 'q';
+                if (!done) printable(got, static_cast<unsigned char>(buf[i]));
+            }
+        } else if (reader == "consolew-vt") {
+            wchar_t buf[256];
+            DWORD n = 0;
+            if (!ReadConsoleW(in, buf, 256, &n, nullptr) || n == 0) break;
+            for (DWORD i = 0; i < n && !done; ++i) {
+                done = buf[i] == L'q';
+                if (!done) printable(got, unsigned(buf[i]));
+            }
+        } else if (reader == "records" || reader == "records-vt") {
+            INPUT_RECORD recs[64];
+            DWORD n = 0;
+            if (!ReadConsoleInputW(in, recs, 64, &n) || n == 0) break;
+            for (DWORD i = 0; i < n && !done; ++i) {
+                if (recs[i].EventType != KEY_EVENT || !recs[i].Event.KeyEvent.bKeyDown) continue;
+                const KEY_EVENT_RECORD& k = recs[i].Event.KeyEvent;
+                for (WORD r = 0; r < std::max<WORD>(k.wRepeatCount, 1) && !done; ++r) {
+                    done = k.uChar.UnicodeChar == L'q';
+                    if (done) break;
+                    if (k.uChar.UnicodeChar) printable(got, unsigned(k.uChar.UnicodeChar));
+                    else got += "{" + std::to_string(k.wVirtualKeyCode) + "}";
+                }
+            }
+        } else {
+            out("BAD-READER\n");
+            return 2;
+        }
+    }
+    out("GOT " + got + " END\n");
+    return 0;
 }
 
 BOOL WINAPI stubborn_handler(DWORD) {
@@ -194,27 +299,12 @@ int main(int argc, char** argv) {
         SetConsoleMode(o, m | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
         SetConsoleOutputCP(CP_UTF8);
 #endif
-        std::string s;
-        for (const char* p = argc > 2 ? argv[2] : ""; *p; ++p) {
-            if (p[0] == '\\' && p[1] == 'e') {
-                s.push_back('\x1b');
-                ++p;
-            } else if (p[0] == '\\' && p[1] == 'n') {
-                s += "\r\n";
-                ++p;
-            } else if (p[0] == '\\' && p[1] == 'u' && std::strlen(p) >= 6) {
-                unsigned cp = unsigned(std::strtoul(std::string(p + 2, 4).c_str(), nullptr, 16));
-                s.push_back(char(0xE0 | (cp >> 12)));
-                s.push_back(char(0x80 | ((cp >> 6) & 0x3F)));
-                s.push_back(char(0x80 | (cp & 0x3F)));
-                p += 5;
-            } else {
-                s.push_back(*p);
-            }
-        }
-        out(s);
+        out(expand(argc > 2 ? argv[2] : ""));
         return 0;
     }
+#if defined(_WIN32)
+    if (mode == "replies" && argc > 2) return replies(argv[2], argc > 3 ? argv[3] : "");
+#endif
     if (mode == "stubborn") {
 #if defined(_WIN32)
         SetConsoleCtrlHandler(stubborn_handler, TRUE);

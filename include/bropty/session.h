@@ -21,6 +21,8 @@
 //  * Replies the terminal generates (DA, DSR, OSC queries) queue behind a
 //    pending paste; at most kMaxReplyBacklog bytes of them, beyond which an
 //    application flooding queries without reading their answers loses them.
+//    (On Windows, conhost decides which of them a program receives: see
+//    "Replies under ConPTY" in pty.h.)
 // The pty's wakeup hook fires when a full queue drains, so a host that saw
 // input_blocked() needs no polling to call update() again.
 
