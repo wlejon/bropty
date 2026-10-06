@@ -94,6 +94,17 @@ jobs:
             grep -hiE '\bskip(ped)?\b' build/Testing/Temporary/LastTest*.log || echo none
             echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # Which replies this runner's conhost forwards and passes differs by
+      # Windows build; test_pty_conpty_replies reports it, and the report is
+      # what pty.h's "Replies under ConPTY" is checked against.
+      - name: ConPTY replies on this build
+        if: always() && runner.os == 'Windows'
+        shell: bash
+        run: |
+          { echo "### ConPTY replies (${{ matrix.name }})"; echo '```'
+            sed -n '/^Windows 10\./,/\[test_pty_conpty_replies\]/p' build/Testing/Temporary/LastTest*.log
+            echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+
   # ── Submodule fallback ────────────────────────────────────────────────────
   #
   # No sibling checkout: brosearch comes from third_party/brosearch at the
