@@ -122,7 +122,9 @@ int main(int argc, char** argv) {
 
 #if !defined(_WIN32)
     arm("a pipeline whose leader has exited: the group's live member", 30);
-    CHECK(r.pty->write("true | \"" + child + "\" nest 0" + enter) > 0);
+    // The second stage reads the terminal, not the pipe (whose EOF would
+    // end it at once).
+    CHECK(r.pty->write("true | \"" + child + "\" nest 0 < /dev/tty" + enter) > 0);
     const auto end = Clock::now() + 10s;
     long long piped = 0;
     while (Clock::now() < end) {
