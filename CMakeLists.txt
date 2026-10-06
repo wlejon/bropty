@@ -113,9 +113,9 @@ set(BROPTY_SOURCES
 )
 
 if(WIN32)
-    list(APPEND BROPTY_SOURCES src/pty_win.cpp)
+    list(APPEND BROPTY_SOURCES src/pty_win.cpp src/process_info_win.cpp)
 else()
-    list(APPEND BROPTY_SOURCES src/pty_posix.cpp src/pty_posix_child.cpp)
+    list(APPEND BROPTY_SOURCES src/pty_posix.cpp src/pty_posix_child.cpp src/process_info_posix.cpp)
 endif()
 
 add_library(bropty STATIC ${BROPTY_SOURCES})

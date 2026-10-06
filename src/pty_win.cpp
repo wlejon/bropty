@@ -28,6 +28,7 @@
 #endif
 #include <windows.h>
 
+#include "process_info.h"
 #include "pty_base.h"
 
 #include <algorithm>
@@ -127,6 +128,10 @@ public:
     bool spawn(const PtyConfig& config) override;
     bool resize(const PtySize& size) override;
     int64_t pid() const override { return pid_; }
+    std::optional<ProcessInfo> foreground_process() const override {
+        if (!spawned_ || exit_->done()) return std::nullopt;
+        return pty_detail::foreground_of_tree(pid_, created_);
+    }
     void terminate() override;
 
 private:
@@ -143,6 +148,7 @@ private:
     Handle out_read_;
     Handle stop_event_;
     int64_t pid_{0};
+    uint64_t created_{0};  // the child's creation time (FILETIME ticks)
 
     std::thread reader_, writer_, waiter_;
     std::atomic<bool> reader_done_{false}, writer_done_{false};
@@ -236,6 +242,9 @@ bool PtyWin::spawn(const PtyConfig& config) {
     CloseHandle(pi.hThread);
     process_.reset(pi.hProcess);
     pid_ = int64_t(pi.dwProcessId);
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (GetProcessTimes(process_.h, &created, &exited, &kernel, &user))
+        created_ = (uint64_t(created.dwHighDateTime) << 32) | created.dwLowDateTime;
     // conhost holds its own duplicates of the pipe ends it uses.
     in_read.reset();
     out_write.reset();

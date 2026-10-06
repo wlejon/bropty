@@ -129,6 +129,29 @@ std::vector<std::string> build_environment(const std::vector<std::string>& base,
     return env;
 }
 
+std::string posix_command_line(const std::vector<std::string>& argv) {
+    std::string out;
+    for (const std::string& a : argv) {
+        if (!out.empty()) out.push_back(' ');
+        const bool plain = !a.empty() && std::all_of(a.begin(), a.end(), [](char c) {
+            const unsigned char u = static_cast<unsigned char>(c);
+            return (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9') || u >= 0x80 ||
+                   std::string_view("-_./=:,+@%^").find(c) != std::string_view::npos;
+        });
+        if (plain) {
+            out += a;
+            continue;
+        }
+        out.push_back('\'');
+        for (char c : a) {
+            if (c == '\'') out += "'\\''";
+            else out.push_back(c);
+        }
+        out.push_back('\'');
+    }
+    return out;
+}
+
 } // namespace pty_detail
 
 } // namespace bropty

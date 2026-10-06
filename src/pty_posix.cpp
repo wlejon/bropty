@@ -21,6 +21,7 @@
 #if !defined(_WIN32)
 
 #include "pty_base.h"
+#include "process_info.h"
 #include "pty_posix_child.h"
 
 #include <algorithm>
@@ -194,6 +195,11 @@ public:
     bool spawn(const PtyConfig& config) override;
     bool resize(const PtySize& size) override;
     int64_t pid() const override { return pid_; }
+    std::optional<ProcessInfo> foreground_process() const override {
+        std::lock_guard<std::mutex> g(master_mu_);
+        if (!spawned_ || exit_->done()) return std::nullopt;
+        return pty_detail::foreground_of_tty(master_);
+    }
     void terminate() override;
 
 private:
@@ -201,6 +207,7 @@ private:
     void writer_main();
     bool signal_and_wait(int sig, std::chrono::milliseconds grace);
 
+    mutable std::mutex master_mu_;  // master_'s closing, against foreground_process()
     int master_{-1};
     int wake_[2]{-1, -1};
     pid_t pid_{-1};
@@ -425,7 +432,10 @@ void PtyPosix::terminate() {
         else pty_detail::hand_to_reaper(child_, exit_);
         child_ = pty_detail::ChildProc{};
         output_done_ = true;
-        close_fd(master_);
+        {
+            std::lock_guard<std::mutex> g(master_mu_);
+            close_fd(master_);
+        }
         close_fd(wake_[0]);
         close_fd(wake_[1]);
     });

@@ -91,6 +91,23 @@ struct PtyConfig {
     std::chrono::milliseconds terminate_grace{500};
 };
 
+// A process as a terminal's title or tab would describe it.
+struct ProcessInfo {
+    int64_t pid{0};
+    // What the process calls itself: the base name of argv[0] (a login
+    // shell's leading '-' dropped; a program that renamed itself, as node
+    // programs setting process.title do, by that name), else the executable's.
+    // Windows: the executable's base name ("cmd.exe").
+    std::string name;
+    std::string path;          // the executable's full path, "" when not readable
+    std::string command_line;  // POSIX: argv joined by spaces, shell-quoted where needed
+
+    bool operator==(const ProcessInfo& o) const {
+        return pid == o.pid && name == o.name && path == o.path && command_line == o.command_line;
+    }
+    bool operator!=(const ProcessInfo& o) const { return !(*this == o); }
+};
+
 class IPtyProcess {
 public:
     virtual ~IPtyProcess() = default;
@@ -154,6 +171,27 @@ public:
     [[nodiscard]] virtual std::optional<int> exit_code() const = 0;
     [[nodiscard]] virtual int64_t pid() const = 0;
 
+    // The process the user is talking to: what owns the terminal now (the
+    // shell at its prompt, the editor it started, the build the editor
+    // started). Empty before spawn, after the child exited, and when nothing
+    // can be read.
+    //   POSIX: the terminal's foreground process group (tcgetpgrp on the
+    //     master), described by its leader -- or, when the leader has gone
+    //     (the first command of a pipeline that finished), by the group's
+    //     lowest live pid. Linux reads /proc; macOS libproc and sysctl.
+    //   Windows: a console has no foreground process group, and ConPTY does
+    //     not let the host read its console's process list without attaching
+    //     to that console (which would detach the host from its own). So the
+    //     answer is the process tree: from the child, repeatedly the youngest
+    //     live child process that is a console program (GUI programs started
+    //     from the shell do not hold the console, and console hosts are not
+    //     the user's), until one has none. A console program the shell runs
+    //     in the background (`start /b`) is indistinguishable from one it
+    //     waits for, and is reported as foreground while it is the youngest.
+    // Callable from any thread; it costs a few system calls on POSIX and a
+    // process snapshot on Windows (~1 ms), so poll it on activity, not per frame.
+    [[nodiscard]] virtual std::optional<ProcessInfo> foreground_process() const = 0;
+
     // Wait for the child to exit (and its output to be fully collected).
     virtual void wait() = 0;
     virtual bool wait_for(std::chrono::milliseconds timeout) = 0;
@@ -188,6 +226,12 @@ std::string windows_command_line(std::string_view command, const std::vector<std
 // `case_insensitive`), as Windows environment blocks must be.
 std::vector<std::string> build_environment(const std::vector<std::string>& base, const PtyConfig& config,
                                            bool case_insensitive);
+// Describe a live process (name, path, command line); false when it does not
+// exist or cannot be read.
+bool describe_process(int64_t pid, ProcessInfo& out);
+// The command line of argv as a POSIX shell would read it back: words with
+// nothing special as they are, others single-quoted.
+std::string posix_command_line(const std::vector<std::string>& argv);
 // Children that outlived terminate() and still await collection by the
 // process-wide reaper (POSIX; always 0 on Windows, where a process handle
 // needs no reaping).

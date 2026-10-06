@@ -38,6 +38,9 @@
 //                              then sleep. how = detached (Windows:
 //                              DETACHED_PROCESS; POSIX: setsid), breakaway
 //                              (Windows: plus CREATE_BREAKAWAY_FROM_JOB)
+//   pty_child nest <n>         run `pty_child nest <n-1>` and wait for it; at
+//                              0 print NEST-READY pid=<pid> (POSIX: and
+//                              pgid=<process group>), then read until 'q'
 #include "test_common.h"
 
 #include <algorithm>
@@ -54,6 +57,7 @@
 #include <csignal>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 #endif
@@ -361,6 +365,43 @@ int main(int argc, char** argv) {
         out("GRANDCHILD " + std::to_string(p) + "\n");
 #endif
         for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    if (mode == "nest") {
+        // A chain of n more of these, each waiting for the next, the last of
+        // which reports itself and waits for a 'q' on the terminal.
+        const int n = argc > 2 ? std::atoi(argv[2]) : 0;
+        if (n <= 0) {
+#if defined(_WIN32)
+            out("NEST-READY pid=" + std::to_string(GetCurrentProcessId()) + "\n");
+#else
+            out("NEST-READY pid=" + std::to_string(getpid()) + " pgid=" + std::to_string(getpgrp()) + "\n");
+#endif
+            for (int c; (c = read_byte()) >= 0 && c != 'q';) {
+            }
+            return 0;
+        }
+        const std::string next = std::to_string(n - 1);
+#if defined(_WIN32)
+        wchar_t self[MAX_PATH];
+        GetModuleFileNameW(nullptr, self, MAX_PATH);
+        std::wstring line = L"\"" + std::wstring(self) + L"\" nest " + std::wstring(next.begin(), next.end());
+        STARTUPINFOW si{};
+        si.cb = sizeof si;
+        PROCESS_INFORMATION pi{};
+        if (!CreateProcessW(nullptr, line.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) return 3;
+        CloseHandle(pi.hThread);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hProcess);
+#else
+        const pid_t p = fork();
+        if (p == 0) {
+            execl(argv[0], argv[0], "nest", next.c_str(), static_cast<char*>(nullptr));
+            _exit(127);
+        }
+        int st = 0;
+        waitpid(p, &st, 0);
+#endif
+        return 0;
     }
 #if !defined(_WIN32)
     if (mode == "pixels") {
