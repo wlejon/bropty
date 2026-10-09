@@ -37,7 +37,7 @@ endif()
 # ../brosearch working tree beside the top-level project; otherwise the pinned
 # commit, fetched at configure.
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/bro_deps.cmake)
-bro_dependency(brosearch GITHUB wlejon/brosearch REF e408e853181e353e086d547b6d1d3e9cc1c0167f
+bro_dependency(brosearch GITHUB wlejon/brosearch
                OPTIONS BROSEARCH_BUILD_TESTS=OFF BROSEARCH_BUILD_TOOLS=OFF)
 
 set(BROPTY_SOURCES
