@@ -9,8 +9,8 @@ C++20 with its own CMake and ctest suite.
 
 In the [Bro ecosystem](https://github.com/wlejon/bro/blob/main/docs/ecosystem.md),
 bropty sits in the terminal layer: bro links it under `BRO_WITH_TERMINAL` to power
-the `<terminal>` element and the [broterm](https://github.com/wlejon/broterm)
-desktop application, and [bromux](https://github.com/wlejon/bromux) uses it for
+the `<terminal>` element and helmterm, the terminal app in
+[helmapps](https://github.com/wlejon/helmapps), and [bromux](https://github.com/wlejon/bromux) uses it for
 session PTY and emulator management. It can also be embedded directly into any
 standalone C++20 terminal emulator, multiplexer, or headless test harness.
 
