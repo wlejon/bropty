@@ -10,21 +10,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# bropty resolves its one sibling, brosearch (the regex engine behind
-# scrollback search), from ../brosearch first (see CMakeLists.txt), so the
-# test jobs reconstruct that layout in the runner workspace before configuring:
-#
-#     $GITHUB_WORKSPACE/
-#       bropty/      <- this repo, checked out into a named path, not the root
-#       brosearch/
-#
-# Hence `path:` on the checkouts and `cmake -S bropty`. brosearch is taken
-# from main, which mirrors how the stack is developed (everything tracks
-# main), so this CI also catches a breaking change landing there.
-#
-# The `submodule` job builds the other way, from third_party/brosearch with no
-# sibling beside it, so the fallback a consumer without the sibling layout
-# relies on cannot rot.
+# bropty's one sibling, brosearch (the regex engine behind scrollback search),
+# comes from the commit CMakeLists.txt pins (cmake/bro_deps.cmake), fetched at
+# configure, so every job builds a plain clone: what a fresh `git clone` gets.
 #
 # The PTY tests run real shells and tests/pty_child through a real ConPTY or
 # POSIX pty on every runner. On Windows they share a ctest RESOURCE_LOCK
@@ -50,11 +38,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: bropty
-
-      - uses: actions/checkout@v7
-        with:
-          repository: wlejon/brosearch
-          path: brosearch
 
       - name: Install Ninja (Linux)
         if: runner.os == 'Linux'
@@ -105,34 +88,6 @@ jobs:
             sed -n '/^Windows 10\./,/\[test_pty_conpty_replies\]/p' build/Testing/Temporary/LastTest*.log
             echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
 
-  # ── Submodule fallback ────────────────────────────────────────────────────
-  #
-  # No sibling checkout: brosearch comes from third_party/brosearch at the
-  # commit this repo pins. The configure step checks it really took that path.
-  submodule:
-    name: Submodule fallback · ubuntu-24.04
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          path: bropty
-          submodules: recursive
-
-      - name: Install Ninja
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ninja-build
-
-      - name: Configure
-        run: |
-          test ! -e brosearch
-          cmake -S bropty -B build -G Ninja -DCMAKE_BUILD_TYPE=Release | tee configure.log
-          grep -q "bropty: brosearch from .*third_party/brosearch (submodule)" configure.log
-
-      - name: Build
-        run: cmake --build build --parallel 4
-
-      - name: Test
-        run: ctest --test-dir build --output-on-failure -j 2
-
   # ── Coverage ──────────────────────────────────────────────────────────────
   #
   # Scoped to bropty's own src/ and include/: brosearch is measured by its own
@@ -146,11 +101,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: bropty
-
-      - uses: actions/checkout@v7
-        with:
-          repository: wlejon/brosearch
-          path: brosearch
 
       - name: Install gcovr + Ninja
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends gcovr ninja-build

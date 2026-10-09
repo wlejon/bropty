@@ -29,14 +29,10 @@ jobs:
       actions: read
 
     steps:
+      # brosearch is fetched at configure from the pinned commit.
       - uses: actions/checkout@v7
         with:
           path: bropty
-
-      - uses: actions/checkout@v7
-        with:
-          repository: wlejon/brosearch
-          path: brosearch
 
       - name: Install Ninja
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ninja-build

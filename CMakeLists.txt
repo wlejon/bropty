@@ -32,32 +32,13 @@ endif()
 
 # ---- brosearch -----------------------------------------------------------------
 # Regex scrollback search (RegexMatcher, search_regex.h) runs on brosearch's
-# linear-time engine. Resolved like the other siblings: an existing `brosearch`
-# target (a superbuild already added it) wins; otherwise the standalone repo
-# beside the top-level project (../brosearch, overridable with
-# -DBROSEARCH_DIR=<path>); otherwise the third_party/brosearch submodule of the
-# top-level project. A consumer vendoring bropty carries brosearch flat in its
-# own third_party/.
-if(NOT TARGET brosearch)
-    set(BROSEARCH_DIR "${CMAKE_SOURCE_DIR}/../brosearch" CACHE PATH
-        "Path to the standalone brosearch repo (set to a missing path to force the submodule)")
-    set(BROSEARCH_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(BROSEARCH_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
-    if(EXISTS "${BROSEARCH_DIR}/CMakeLists.txt")
-        message(STATUS "bropty: brosearch from ${BROSEARCH_DIR}")
-        add_subdirectory("${BROSEARCH_DIR}" "${CMAKE_BINARY_DIR}/brosearch" EXCLUDE_FROM_ALL)
-    elseif(EXISTS "${CMAKE_SOURCE_DIR}/third_party/brosearch/CMakeLists.txt")
-        message(STATUS "bropty: brosearch from ${CMAKE_SOURCE_DIR}/third_party/brosearch (submodule)")
-        add_subdirectory("${CMAKE_SOURCE_DIR}/third_party/brosearch" "${CMAKE_BINARY_DIR}/brosearch"
-                         EXCLUDE_FROM_ALL)
-    else()
-        message(FATAL_ERROR
-            "bropty needs brosearch (regex scrollback search): not found at ${BROSEARCH_DIR} or "
-            "${CMAKE_SOURCE_DIR}/third_party/brosearch. Clone https://github.com/wlejon/brosearch "
-            "next to this repo, run `git submodule update --init --recursive`, or pass "
-            "-DBROSEARCH_DIR=<path>.")
-    endif()
-endif()
+# linear-time engine. Resolved through cmake/bro_deps.cmake: an existing
+# `brosearch` target (a superbuild already added it) wins; otherwise the
+# ../brosearch working tree beside the top-level project; otherwise the pinned
+# commit, fetched at configure.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/bro_deps.cmake)
+bro_dependency(brosearch GITHUB wlejon/brosearch REF e408e853181e353e086d547b6d1d3e9cc1c0167f
+               OPTIONS BROSEARCH_BUILD_TESTS=OFF BROSEARCH_BUILD_TOOLS=OFF)
 
 set(BROPTY_SOURCES
     src/version.cpp

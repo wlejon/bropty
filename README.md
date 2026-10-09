@@ -84,21 +84,16 @@ bropty accepts the kitty graphics protocol (transmission, placements, Unicode pl
 
 ### Dependencies
 
-bropty requires [brosearch](https://github.com/wlejon/brosearch) for linear-time regex scrollback search. CMake resolves `brosearch` automatically in this order:
+bropty requires [brosearch](https://github.com/wlejon/brosearch) for linear-time regex scrollback search. There are no submodules; CMake resolves `brosearch` through `cmake/bro_deps.cmake`, in this order:
 1. An existing `brosearch` target already configured by a parent build (e.g. in `bro`).
-2. Sibling directory: `../brosearch` relative to the top-level project, or an explicit `-DBROSEARCH_DIR=<path>`.
-3. Vendored submodule: `third_party/brosearch` within the repository.
+2. A working tree at `../brosearch` beside the top-level project (or `-DFETCHCONTENT_SOURCE_DIR_BROSEARCH=<path>`).
+3. The commit `CMakeLists.txt` pins, fetched from GitHub at configure.
 
 ### Standalone build
 
 ```bash
-# Sibling layout (clone side by side):
-git clone https://github.com/wlejon/brosearch
 git clone https://github.com/wlejon/bropty
-
-# Or single checkout with submodules:
-git clone https://github.com/wlejon/bropty
-cd bropty && git submodule update --init --recursive
+cd bropty
 
 # Linux / macOS (Ninja)
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -113,20 +108,10 @@ ctest --test-dir build -C Release --output-on-failure
 
 ### Embedding in a CMake project
 
-Consumers embed bropty via `add_subdirectory()` and link against `bropty::bropty`. Either clone `bropty` and `brosearch` as siblings, or place them flat under `third_party/`:
-
-```
-my_project/
-  third_party/
-    bropty/
-    brosearch/
-```
-
-In your `CMakeLists.txt`:
+Consumers embed bropty via `add_subdirectory()` (bro-ecosystem projects pin it with `bro_dependency(bropty ...)`) and link against `bropty::bropty`; bropty brings brosearch itself unless the consumer already added it.
 
 ```cmake
-# When vendoring in third_party/:
-add_subdirectory(third_party/bropty)
+add_subdirectory(path/to/bropty)
 
 target_link_libraries(my_terminal PRIVATE bropty::bropty)
 ```
