@@ -1,8 +1,8 @@
 version: 2
 
-# No package manifest to watch. brosearch is a bro_dependency() pin in
-# CMakeLists.txt, moved deliberately (bro's scripts/bump-deps.sh) when bropty
-# needs a newer brosearch; a ../brosearch working tree wins locally. The test-only references under tests/third_party
+# No package manifest to watch. brosearch is a bro_dependency() in
+# CMakeLists.txt that tracks brosearch's main; a ../brosearch working tree wins
+# locally. The test-only references under tests/third_party
 # (libvterm, libsixel, stb) are pinned copies with local patches, updated by
 # hand. That leaves the pinned actions in .github/workflows/.
 updates:

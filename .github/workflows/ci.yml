@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 # bropty's one sibling, brosearch (the regex engine behind scrollback search),
-# comes from the commit CMakeLists.txt pins (cmake/bro_deps.cmake), fetched at
+# comes from the head of its main branch (cmake/bro_deps.cmake), fetched at
 # configure, so every job builds a plain clone: what a fresh `git clone` gets.
 #
 # The PTY tests run real shells and tests/pty_child through a real ConPTY or

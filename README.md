@@ -108,7 +108,7 @@ ctest --test-dir build -C Release --output-on-failure
 
 ### Embedding in a CMake project
 
-Consumers embed bropty via `add_subdirectory()` (bro-ecosystem projects pin it with `bro_dependency(bropty ...)`) and link against `bropty::bropty`; bropty brings brosearch itself unless the consumer already added it.
+Consumers embed bropty via `add_subdirectory()` (bro-ecosystem projects declare it with `bro_dependency(bropty ...)`) and link against `bropty::bropty`; bropty brings brosearch itself unless the consumer already added it.
 
 ```cmake
 add_subdirectory(path/to/bropty)
