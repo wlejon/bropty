@@ -55,6 +55,7 @@
 //                              ENABLE_VIRTUAL_TERMINAL_INPUT, otherwise the
 //                              input mode is 0 (no line input, no echo)
 #include "test_common.h"
+#include "pty_child_reporter.h"
 
 #include <algorithm>
 #include <chrono>
@@ -264,6 +265,9 @@ int main(int argc, char** argv) {
     g_inherited_error_mode = GetErrorMode();  // what the parent handed down, before init_test()
 #endif
     init_test();  // its own children (grandchild mode) inherit the error mode too
+    // A copy named *testchild*: the application-test personality, whose
+    // arguments are reported, never interpreted (pty_child_reporter.h).
+    if (testchild::selected(argc > 0 ? argv[0] : nullptr)) return testchild::run(argc, argv);
     if (argc < 2) return 2;
     std::string mode = argv[1];
     if (mode == "args") {
