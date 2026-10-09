@@ -24,6 +24,7 @@
 #else
 #include <cerrno>
 #include <csignal>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -264,6 +265,40 @@ int main(int argc, char** argv) {
         CHECK(wait_gone(pid, 5000ms));  // reaped: not even a zombie is left
         s.attach_pty(nullptr);
     }
+#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
+    {
+        // What each terminal adds to the host's process list: the supervisor
+        // between the host and the pty child. It must be the host's memory
+        // (CLONE_VM), not a copy of it, and say what it is.
+        arm("Linux: the pty child's supervisor shares the host's memory and is named bropty-wait", 30);
+        Run r(child({"sleep"}));
+        CHECK(r.ok);
+        const int64_t pid = r.pty->pid();
+        auto read_file = [](const std::string& path) {
+            std::string s;
+            if (FILE* f = std::fopen(path.c_str(), "r")) {
+                char buf[512];
+                size_t n = std::fread(buf, 1, sizeof buf, f);
+                s.assign(buf, n);
+                std::fclose(f);
+            }
+            return s;
+        };
+        // ppid: the field after the parenthesised comm and the state.
+        const std::string stat = read_file("/proc/" + std::to_string(pid) + "/stat");
+        const size_t close_paren = stat.rfind(')');
+        long super = 0;
+        char state = 0;
+        if (close_paren != std::string::npos) std::sscanf(stat.c_str() + close_paren + 1, " %c %ld", &state, &super);
+        CHECK(super > 0 && super != long(::getpid()));
+        CHECK_EQ(read_file("/proc/" + std::to_string(super) + "/comm"), std::string("bropty-wait\n"));
+        // kcmp(KCMP_VM): 0 when both are the same address space.
+        CHECK_EQ(::syscall(SYS_kcmp, ::getpid(), pid_t(super), 1 /* KCMP_VM */, 0, 0), 0L);
+        // The pty child itself is a separate image (it exec'd).
+        CHECK(::syscall(SYS_kcmp, ::getpid(), pid_t(pid), 1, 0, 0) != 0L);
+        r.release().reset();
+    }
+#endif
     {
         arm("POSIX: a grandchild that left the session (setsid) is not chased", 30);
         Run r(child({"grandchild", "detached"}));

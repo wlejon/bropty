@@ -30,6 +30,7 @@
 
 #if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
 #define BROPTY_SUPERVISOR 1
+#include <sys/prctl.h>
 #endif
 
 namespace bropty::pty_detail {
@@ -136,6 +137,12 @@ int supervisor_main(void* p) {
     raw_syscall(SYS_rt_sigaction, SIGCHLD, long(&dfl), 0, 8);
     long pid = raw_syscall(SYS_clone, SIGCHLD, 0, 0, 0, 0);  // fork()
     if (pid == 0) a.fn(a.arg);                               // the pty child; never returns
+    // Its own name in top / ps -o comm / pgrep: it shares the host's memory
+    // (CLONE_VM), so it costs a task and this stack, not a copy of the host,
+    // but by the host's name it read as one more host process per terminal.
+    // (Its command line is the host's: that lives in the shared memory.)
+    static const char kName[16] = "bropty-wait";
+    raw_syscall(SYS_prctl, PR_SET_NAME, long(kName));
     raw_write_i32(a.status_w, int32_t(pid));                 // pid, or -errno
     raw_close_except(a.status_w, a.release_r, a.max_fd);
     if (pid < 0) raw_syscall(SYS_exit, 1);
