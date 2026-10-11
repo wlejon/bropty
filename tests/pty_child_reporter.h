@@ -1,7 +1,7 @@
 // pty_child's "test child" personality: a program for an APPLICATION's tests
 // (a terminal app launching profiles, tabs, commands) to run, reporting
 // exactly what it was started with. Chosen by the executable's name: a copy
-// of pty_child whose file name contains "testchild" (helmterm-testchild,
+// of pty_child whose file name contains "testchild" (term-testchild,
 // say) is this program, because its arguments are the thing under test and
 // cannot carry a mode. What it does is chosen by environment variables:
 //
