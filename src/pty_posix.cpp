@@ -207,9 +207,10 @@ private:
     void writer_main();
     bool signal_and_wait(int sig, std::chrono::milliseconds grace);
 
-    mutable std::mutex master_mu_;  // master_'s closing, against foreground_process()
+    mutable std::mutex master_mu_;  // master_'s closing, against foreground_process() and resize()
     int master_{-1};
     int wake_[2]{-1, -1};
+    int wait_wake_[2]{-1, -1};
     pid_t pid_{-1};
     pty_detail::ChildProc child_;
     std::thread reader_, writer_, waiter_;
@@ -296,11 +297,17 @@ bool PtyPosix::spawn(const PtyConfig& config) {
     struct winsize ws = winsize_of(config.size);
     ioctl(slave, TIOCSWINSZ, &ws);
 
-    int errpipe[2];
-    if (!make_pipe(errpipe) || !make_pipe(wake_)) {
+    int errpipe[2]{-1, -1};
+    if (!make_pipe(errpipe) || !make_pipe(wake_) || !make_pipe(wait_wake_)) {
         int e = errno;
         ::close(slave);
         close_fd(master_);
+        close_fd(errpipe[0]);
+        close_fd(errpipe[1]);
+        close_fd(wake_[0]);
+        close_fd(wake_[1]);
+        close_fd(wait_wake_[0]);
+        close_fd(wait_wake_[1]);
         return fail(errno_text("pipe", e));
     }
 
@@ -320,6 +327,8 @@ bool PtyPosix::spawn(const PtyConfig& config) {
         close_fd(master_);
         close_fd(wake_[0]);
         close_fd(wake_[1]);
+        close_fd(wait_wake_[0]);
+        close_fd(wait_wake_[1]);
         return fail(errno_text("fork", fork_errno));
     }
 
@@ -334,6 +343,8 @@ bool PtyPosix::spawn(const PtyConfig& config) {
         close_fd(master_);
         close_fd(wake_[0]);
         close_fd(wake_[1]);
+        close_fd(wait_wake_[0]);
+        close_fd(wait_wake_[1]);
         return fail(errno_text(step_name(ce.step), ce.err) + " (" + command + ")");
     }
 
@@ -342,9 +353,9 @@ bool PtyPosix::spawn(const PtyConfig& config) {
     spawned_ = true;
     reader_ = std::thread(&PtyPosix::reader_main, this);
     writer_ = std::thread(&PtyPosix::writer_main, this);
-    // Woken through wake_ at teardown, so it is always joined.
+    // Woken through wait_wake_ at teardown, so it is always joined.
     waiter_ = std::thread([this] {
-        if (pty_detail::wait_exit(child_, wake_[0], *exit_)) notify();
+        if (pty_detail::wait_exit(child_, wait_wake_[0], *exit_)) notify();
     });
     return true;
 }
@@ -397,6 +408,7 @@ void PtyPosix::writer_main() {
 }
 
 bool PtyPosix::resize(const PtySize& size) {
+    std::lock_guard<std::mutex> g(master_mu_);
     if (master_ < 0 || exit_->done()) return false;
     struct winsize ws = winsize_of(size);
     return ioctl(master_, TIOCSWINSZ, &ws) == 0;  // the kernel sends SIGWINCH
@@ -417,13 +429,15 @@ void PtyPosix::terminate() {
     std::call_once(teardown_, [this] {
         ring_->close();  // unblock a reader waiting for ring space; drop further output
         stop_input();
+        char b = 1;
+        ssize_t r = ::write(wake_[1], &b, 1);
+        (void)r;
         // SIGKILL normally takes effect at once; a child still there after
         // the last wait is stuck in the kernel and is left to the reaper.
         if (!signal_and_wait(SIGHUP, config_.terminate_grace) && !signal_and_wait(SIGTERM, config_.terminate_grace))
             signal_and_wait(SIGKILL, std::max<std::chrono::milliseconds>(config_.terminate_grace,
                                                                          std::chrono::milliseconds(2000)));
-        char b = 1;
-        ssize_t r = ::write(wake_[1], &b, 1);
+        r = ::write(wait_wake_[1], &b, 1);
         (void)r;
         if (reader_.joinable()) reader_.join();
         if (writer_.joinable()) writer_.join();
@@ -438,6 +452,8 @@ void PtyPosix::terminate() {
         }
         close_fd(wake_[0]);
         close_fd(wake_[1]);
+        close_fd(wait_wake_[0]);
+        close_fd(wait_wake_[1]);
     });
 }
 
