@@ -1,9 +1,12 @@
 // Parser: Williams state-machine edge cases and strict UTF-8, checked as the
 // full event log a byte stream produces.
+#include "base64.h"
 #include "bropty/parser.h"
 #include "check.h"
+#include "kitty_command.h"
 
 #include <cstdio>
+#include <limits>
 #include <string>
 
 using namespace bropty;
@@ -177,6 +180,79 @@ int main() {
         p.set_max_string_bytes(16);
         p.feed("\x1b]0;" + std::string(100, 'x') + "\x07Z\x1b]0;ok\x07");
         CHECK_EQ(r.log, std::string("P(Z)OSC(0;ok,BEL)"));
+    }
+
+    // Symbolic / boundary equivalence for CSI parameter saturation, shift bounds,
+    // UTF-8 prefix truncation, KittyCommand integer limits, and base64_decoded_bound.
+    {
+        // 1. CSI parameter integer boundaries (65534, 65535, 65536, UINT32_MAX, UINT64_MAX):
+        // EXPECT verifies both bulk fast-path and byte-at-a-time slow-path produce identical output.
+        EXPECT("\x1b[65534;65535;65536;4294967295;4294967296;18446744073709551615m",
+               "CSI(65534;65535;65535;65535;65535;65535||m)");
+
+        // 2. Sub-parameter bitmask shift safety at kMaxParams (32) boundary:
+        // 40 colon-separated parameters must never shift 1u << 32 (UB) and must set overflow.
+        Recorder r_bulk, r_byte;
+        CsiSeq last_bulk{}, last_byte{};
+        struct CsiCapture : ParserSink {
+            CsiSeq seq{};
+            bool got{false};
+            void print(char32_t) override {}
+            void print_ascii(const char*, size_t) override {}
+            void execute(uint8_t) override {}
+            void esc_dispatch(const EscSeq&) override {}
+            void csi_dispatch(const CsiSeq& s) override { seq = s; got = true; }
+            void osc_dispatch(std::string_view, bool) override {}
+            void dcs_hook(const CsiSeq&) override {}
+            void dcs_put(std::string_view) override {}
+            void dcs_unhook(bool) override {}
+            void string_dispatch(StringKind, std::string_view) override {}
+        } cap_bulk, cap_byte;
+
+        std::string colons = "\x1b[";
+        for (int i = 0; i < 40; ++i) colons += (i ? ":65539" : "65539");
+        colons += ":m";
+        Parser pb(&cap_bulk), ps(&cap_byte);
+        pb.feed(colons);
+        for (char c : colons) ps.feed(std::string_view(&c, 1));
+        CHECK(cap_bulk.got && cap_byte.got);
+        CHECK_EQ(int(cap_bulk.seq.count), CsiSeq::kMaxParams);
+        CHECK_EQ(int(cap_byte.seq.count), CsiSeq::kMaxParams);
+        CHECK(cap_bulk.seq.overflow && cap_byte.seq.overflow);
+        CHECK_EQ(cap_bulk.seq.present, 0xFFFFFFFFu);
+        CHECK_EQ(cap_byte.seq.present, 0xFFFFFFFFu);
+        CHECK_EQ(cap_bulk.seq.sub, 0xFFFFFFFEu);
+        CHECK_EQ(cap_byte.seq.sub, 0xFFFFFFFEu);
+        for (int i = 0; i < CsiSeq::kMaxParams; ++i) {
+            CHECK_EQ(cap_bulk.seq.params[i], uint16_t(65535));
+            CHECK_EQ(cap_byte.seq.params[i], uint16_t(65535));
+        }
+
+        // 3. Truncated escape / UTF-8 frames at every byte offset [0 .. frame.size()-1].
+        const std::string mixed = "\x1b[38:2:255:128:0m\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80\x1b]0;title\x1b\\\x1bPq#0;2;0;0;0~-\x1b\\";
+        for (size_t cut = 0; cut <= mixed.size(); ++cut) {
+            std::string sub(mixed.data(), cut);
+            CHECK_EQ(run(sub), run_bytewise(sub));
+        }
+
+        // 4. KittyCommand u32 / i32 boundary & 64-bit overflow rejection.
+        detail::KittyCommand kc;
+        std::string kerr;
+        CHECK(detail::parse_kitty_command("a=t,i=4294967295,z=-2147483648,H=2147483647;AAAA", kc, kerr));
+        CHECK_EQ(kc.id, 0xFFFFFFFFu);
+        CHECK_EQ(kc.z, INT32_MIN);
+        CHECK_EQ(kc.parent_dx, INT32_MAX);
+
+        CHECK(!detail::parse_kitty_command("i=4294967296", kc, kerr));
+        CHECK(!detail::parse_kitty_command("i=18446744073709551615", kc, kerr));
+        CHECK(!detail::parse_kitty_command("z=-2147483649", kc, kerr));
+        CHECK(!detail::parse_kitty_command("z=2147483648", kc, kerr));
+
+        // 5. base64_decoded_bound overflow safety at SIZE_MAX.
+        const size_t sz_max = std::numeric_limits<size_t>::max();
+        CHECK(detail::base64_decoded_bound(sz_max) > sz_max / 2);
+        CHECK(detail::base64_decoded_bound(sz_max - 1) > sz_max / 2);
+        CHECK(detail::base64_decoded_bound(sz_max - 2) > sz_max / 2);
     }
 
     return check::finish("test_parser");

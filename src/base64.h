@@ -13,7 +13,9 @@
 namespace bropty::detail {
 
 // Decoded size of `n` base64 characters (an upper bound when there is padding).
-[[nodiscard]] constexpr size_t base64_decoded_bound(size_t n) noexcept { return (n + 3) / 4 * 3; }
+[[nodiscard]] constexpr size_t base64_decoded_bound(size_t n) noexcept {
+    return (n / 4) * 3 + ((n & 3) ? (n & 3) : 0);
+}
 
 bool base64_decode_append(std::string_view in, std::vector<uint8_t>& out);
 bool base64_decode_append(std::string_view in, std::string& out);

@@ -285,8 +285,13 @@ bool decode_with_host(std::string_view data, const GraphicsOptions& o, TerminalH
         error = "EINVAL:Decoded image has an invalid size";
         return false;
     }
+    if (uint64_t(out.width) > o.storage_limit / 4 ||
+        uint64_t(out.height) > (o.storage_limit / 4) / out.width) {
+        error = "ENOSPC:Image is larger than the storage quota";
+        return false;
+    }
     const size_t frame = size_t(out.width) * out.height * 4;
-    if (frame * out.frames.size() > o.storage_limit) {
+    if (out.frames.size() > o.storage_limit / frame) {
         error = "ENOSPC:Image is larger than the storage quota";
         return false;
     }
@@ -318,11 +323,12 @@ bool decode_kitty_pixels(const KittyCommand& c, std::vector<uint8_t>& data, cons
             return false;
         }
     }
-    const size_t expected = raw ? size_t(c.width) * c.height * bpp : 0;
-    if (raw && expected > o.storage_limit) {
+    if (raw && (uint64_t(c.width) > o.storage_limit / bpp ||
+                uint64_t(c.height) > (o.storage_limit / bpp) / c.width)) {
         error = "ENOSPC:Image is larger than the storage quota";
         return false;
     }
+    const size_t expected = raw ? size_t(c.width) * c.height * bpp : 0;
     if (c.compression == 'z') {
         std::vector<uint8_t> inflated;
         const size_t cap = raw ? expected : (c.size ? size_t(c.size) : o.max_transmission_bytes);

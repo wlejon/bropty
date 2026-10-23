@@ -97,7 +97,7 @@ void Terminal::osc_notify99(std::string_view rest, bool bel) {
             dst.append(payload);
         }
         const size_t cap = std::min(kMaxNotificationBytes, opts_.max_string_bytes);
-        if (n.title.size() + n.body.size() > cap) {
+        if (n.title.size() > cap || n.body.size() > cap - n.title.size()) {
             // Too big: dropped whole, so its remaining chunks are swallowed
             // rather than shown as a notification of their own.
             it->overflow = true;

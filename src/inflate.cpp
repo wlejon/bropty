@@ -137,9 +137,16 @@ struct Out {
 
     bool ensure(size_t n) {
         if (n > max - pos) return false;
-        if (pos + n > v.size()) {
-            size_t cap = v.size() < 4096 ? 4096 : v.size() * 2;
-            while (cap < pos + n) cap *= 2;
+        const size_t need = pos + n;
+        if (need > v.size()) {
+            size_t cap = v.size() < 4096 ? 4096 : v.size();
+            while (cap < need) {
+                if (cap > max / 2) {
+                    cap = max;
+                    break;
+                }
+                cap *= 2;
+            }
             if (cap > max) cap = max;
             v.resize(cap);
         }

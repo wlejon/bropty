@@ -131,7 +131,7 @@ void Parser::feed(std::string_view bytes) {
                 if (state_ == State::DcsPassthrough) {
                     sink_->dcs_put(run);
                 } else if (!str_overflow_) {
-                    if (str_.size() + run.size() > max_string_) {
+                    if (run.size() > max_string_ || str_.size() > max_string_ - run.size()) {
                         str_overflow_ = true;
                         str_.clear();
                         str_.shrink_to_fit();
